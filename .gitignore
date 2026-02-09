@@ -57,6 +57,9 @@ cmake_install.cmake
 Makefile
 compile_commands.json
 
+# Claude Code
+.claude/
+
 # Temporary files
 *.tmp
 *.swp
