@@ -87,3 +87,67 @@ target_link_libraries(InKey
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+# ============================================================
+# Unit Tests
+# ============================================================
+option(BUILD_TESTS "Build unit tests" ON)
+
+if(BUILD_TESTS)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.5.2
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    juce_add_console_app(InKeyTests
+        PRODUCT_NAME "InKey Tests"
+    )
+
+    target_sources(InKeyTests PRIVATE
+        # Test runner
+        Tests/TestMain.cpp
+        # Test files
+        Tests/NoteDataTests.cpp
+        Tests/PitchDetectorTests.cpp
+        Tests/NoteSegmenterTests.cpp
+        Tests/QuantizationEngineTests.cpp
+        Tests/MFCCExtractorTests.cpp
+        Tests/DTWAlignerTests.cpp
+        Tests/AudioEngineTests.cpp
+        Tests/AudioCaptureTests.cpp
+        Tests/EditActionsTests.cpp
+        # Source files under test
+        Source/Analysis/PitchDetector.cpp
+        Source/Analysis/NoteSegmenter.cpp
+        Source/Editing/QuantizationEngine.cpp
+        Source/Alignment/MFCCExtractor.cpp
+        Source/Alignment/DTWAligner.cpp
+        Source/Audio/AudioCapture.cpp
+        Source/DSP/AudioEngine.cpp
+    )
+
+    target_include_directories(InKeyTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source
+    )
+
+    target_compile_definitions(InKeyTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+    )
+
+    target_link_libraries(InKeyTests PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+        rubberband
+        Catch2::Catch2
+    )
+
+    enable_testing()
+    list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+    include(Catch)
+    catch_discover_tests(InKeyTests)
+endif()
