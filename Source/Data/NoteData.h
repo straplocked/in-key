@@ -19,6 +19,8 @@ struct Note
     float formantShiftSemitones = 0.0f;
     double timeOffset = 0.0;
     double durationScale = 1.0;
+    float gainDB = 0.0f;          // Volume adjustment in dB (-24 to +12)
+    float pitchDriftScale = 1.0f;  // Vibrato/drift control (0=flat, 1=original, 2=exaggerated)
 
     // Check if note has any edits
     bool isEdited() const
@@ -26,7 +28,9 @@ struct Note
         return std::abs (pitchShiftSemitones) > 0.01f
             || std::abs (formantShiftSemitones) > 0.01f
             || std::abs (timeOffset) > 0.001
-            || std::abs (durationScale - 1.0) > 0.001;
+            || std::abs (durationScale - 1.0) > 0.001
+            || std::abs (gainDB) > 0.01f
+            || std::abs (pitchDriftScale - 1.0f) > 0.01f;
     }
 
     // Reset all edits to defaults
@@ -36,6 +40,8 @@ struct Note
         formantShiftSemitones = 0.0f;
         timeOffset = 0.0;
         durationScale = 1.0;
+        gainDB = 0.0f;
+        pitchDriftScale = 1.0f;
     }
 
     // Computed helpers

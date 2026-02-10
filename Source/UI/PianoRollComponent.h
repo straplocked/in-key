@@ -4,6 +4,9 @@
 #include "../Data/NoteData.h"
 #include "../Data/PitchData.h"
 #include "../Editing/EditActions.h"
+#include "../Editing/QuantizationEngine.h"
+#include <set>
+#include <map>
 
 class PianoRollComponent : public juce::Component
 {
@@ -21,10 +24,21 @@ public:
 
     // Edit a note's properties (records undo action)
     void editNoteProperty (int noteId, float pitchShift, float formantShift,
-                           double timeOffset, double durationScale);
+                           double timeOffset, double durationScale,
+                           float gainDB = 0.0f, float pitchDriftScale = 1.0f);
 
-    // Quantize all notes' pitch to nearest semitone
+    // Quantize notes' pitch (chromatic, full strength — legacy)
     void quantizePitch();
+
+    // Quantize with scale and strength control
+    void quantizePitchToScale (float strength, const ScaleDefinition& scale);
+
+    // Set current scale for grid visualization (empty = chromatic / no shading)
+    void setCurrentScale (const ScaleDefinition& scale) { currentScale = scale; repaint(); }
+
+    // Note splitting and merging
+    void splitNoteAtTime (int noteId, double splitTimeSeconds);
+    void mergeSelectedNotes();
 
     // Reset all edits on all notes
     void resetAllEdits();
@@ -49,8 +63,12 @@ public:
     // Set playback position for playhead drawing (in seconds)
     void setPlayheadPosition (double timeSeconds);
 
-    // Selected note
-    int getSelectedNoteId() const { return selectedNoteId; }
+    // Selection
+    int getSelectedNoteId() const;
+    const std::set<int>& getSelectedNoteIds() const { return selectedNoteIds; }
+    bool isNoteSelected (int noteId) const { return selectedNoteIds.count (noteId) > 0; }
+    void selectAllNotes();
+    void deselectAll();
 
     // Listener for note edits and selection
     class Listener
@@ -58,6 +76,7 @@ public:
     public:
         virtual ~Listener() = default;
         virtual void noteSelected (const Note* note) = 0;
+        virtual void selectionChanged (const std::set<int>& selectedIds) = 0;
         virtual void noteEdited (const Note& note) = 0;
     };
 
@@ -74,7 +93,15 @@ private:
     double viewDuration = 5.0;
     int viewBottomMidi = 48;
     int viewTopMidi = 84;
-    int selectedNoteId = -1;
+
+    // Selection (multi-note)
+    std::set<int> selectedNoteIds;
+
+    // Lasso selection
+    bool isLassoing = false;
+    juce::Point<float> lassoStart;
+    juce::Rectangle<float> lassoRect;
+    std::set<int> preLassoSelection;  // selection state before lasso began
 
     // Panning
     bool isPanning = false;
@@ -88,17 +115,25 @@ private:
     int dragNoteId = -1;
     float dragStartX = 0.0f;
     float dragStartY = 0.0f;
-    // Snapshot of note state before drag began
+    // Snapshot of note state before drag began (single note for resize, multi for move)
     float dragOriginalPitchShift = 0.0f;
     double dragOriginalTimeOffset = 0.0;
     double dragOriginalDurationScale = 1.0;
     NoteEditAction::EditState dragBeforeState {};
+    // Multi-note drag state
+    std::map<int, NoteEditAction::EditState> multiDragBeforeStates;
 
     // Edge detection threshold in pixels
     static constexpr float edgeThreshold = 6.0f;
 
     // Undo manager
     juce::UndoManager undoManager { 500 };
+
+    // Next note ID for split/merge operations
+    int nextNoteId = 1;
+
+    // Current scale for grid visualization
+    ScaleDefinition currentScale;
 
     // Playhead
     double playheadTime = -1.0;
@@ -115,7 +150,9 @@ private:
     void drawGrid (juce::Graphics& g);
     void drawPianoKeys (juce::Graphics& g);
     void drawNotes (juce::Graphics& g);
+    void drawNotePitchCurve (juce::Graphics& g, const Note& note, const juce::Rectangle<float>& rect);
     void drawPitchCurve (juce::Graphics& g);
+    void drawLasso (juce::Graphics& g);
     void drawPlayhead (juce::Graphics& g);
 
     // Hit testing — uses edited positions
@@ -130,6 +167,14 @@ private:
 
     // Record undo action from drag
     void recordDragUndo (int noteId);
+    void recordMultiDragUndo();
+
+    // Notify listeners about selection changes
+    void notifySelectionChanged();
+    const Note* getFirstSelectedNote() const;
+
+    // Helper for split: compute average pitch from pitch curve in a time range
+    float computeAveragePitch (double startTime, double endTime) const;
 
     // Layout
     static constexpr float pianoKeyWidth = 50.0f;

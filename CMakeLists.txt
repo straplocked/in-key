@@ -65,6 +65,7 @@ target_sources(InKey PRIVATE
     Source/UI/PropertiesPanel.cpp
     Source/Alignment/MFCCExtractor.cpp
     Source/Alignment/DTWAligner.cpp
+    Source/Editing/QuantizationEngine.cpp
     Source/UI/InKeyLookAndFeel.cpp
 )
 

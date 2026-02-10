@@ -100,11 +100,48 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     quantizeButton.setColour (juce::TextButton::buttonColourId, InKeyColours::accentQuantize);
     quantizeButton.onClick = [this]()
     {
-        pianoRollComponent.quantizePitch();
+        float strength = static_cast<float> (quantizeStrengthSlider.getValue()) / 100.0f;
+        auto scale = getCurrentScale();
+        pianoRollComponent.quantizePitchToScale (strength, scale);
         pianoRollComponent.repaint();
         updatePropertiesFromSelection();
     };
     addChildComponent (quantizeButton);
+
+    // Scale root selector (C, C#, D, ...)
+    for (int i = 0; i < 12; ++i)
+        scaleRootSelector.addItem (QuantizationEngine::rootNoteName (i), i + 1);
+    scaleRootSelector.setSelectedId (1, juce::dontSendNotification); // C
+    scaleRootSelector.onChange = [this]()
+    {
+        pianoRollComponent.setCurrentScale (getCurrentScale());
+    };
+    addChildComponent (scaleRootSelector);
+
+    // Scale type selector
+    scaleTypeSelector.addItem ("Chromatic", 1);
+    scaleTypeSelector.addItem ("Major", 2);
+    scaleTypeSelector.addItem ("Natural Minor", 3);
+    scaleTypeSelector.addItem ("Harmonic Minor", 4);
+    scaleTypeSelector.addItem ("Pentatonic", 5);
+    scaleTypeSelector.addItem ("Blues", 6);
+    scaleTypeSelector.addItem ("Dorian", 7);
+    scaleTypeSelector.addItem ("Mixolydian", 8);
+    scaleTypeSelector.setSelectedId (1, juce::dontSendNotification);
+    scaleTypeSelector.onChange = [this]()
+    {
+        pianoRollComponent.setCurrentScale (getCurrentScale());
+    };
+    addChildComponent (scaleTypeSelector);
+
+    // Quantize strength slider (0-100%)
+    quantizeStrengthSlider.setRange (0.0, 100.0, 1.0);
+    quantizeStrengthSlider.setValue (100.0, juce::dontSendNotification);
+    quantizeStrengthSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    quantizeStrengthSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 35, 20);
+    quantizeStrengthSlider.setTextValueSuffix ("%");
+    quantizeStrengthSlider.setColour (juce::Slider::thumbColourId, InKeyColours::accentQuantize);
+    addChildComponent (quantizeStrengthSlider);
 
     // Reset button
     resetButton.setButtonText ("Reset");
@@ -134,10 +171,39 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     // Properties panel
     addChildComponent (propertiesPanel);
     propertiesPanel.onPropertyChanged = [this] (int noteId, float pitchShift, float formantShift,
-                                                 double timeOffset, double durationScale)
+                                                 double timeOffset, double durationScale,
+                                                 float gainDB, float pitchDriftScale)
     {
         pianoRollComponent.editNoteProperty (noteId, pitchShift, formantShift,
-                                              timeOffset, durationScale);
+                                              timeOffset, durationScale, gainDB, pitchDriftScale);
+        pianoRollComponent.repaint();
+    };
+
+    propertiesPanel.onMultiPropertyChanged = [this] (float pitchDelta, float formantDelta,
+                                                      float gainDelta, float driftDelta)
+    {
+        // Apply delta to all selected notes
+        const auto& selectedIds = pianoRollComponent.getSelectedNoteIds();
+        if (selectedIds.empty())
+            return;
+
+        for (const auto& note : pianoRollComponent.getNotes())
+        {
+            if (selectedIds.count (note.id))
+            {
+                float newPitch = juce::jlimit (-24.0f, 24.0f,
+                                                note.pitchShiftSemitones + pitchDelta);
+                float newFormant = juce::jlimit (-12.0f, 12.0f,
+                                                  note.formantShiftSemitones + formantDelta);
+                float newGain = juce::jlimit (-24.0f, 12.0f,
+                                               note.gainDB + gainDelta);
+                float newDrift = juce::jlimit (0.0f, 2.0f,
+                                                note.pitchDriftScale + driftDelta);
+                pianoRollComponent.editNoteProperty (note.id, newPitch, newFormant,
+                                                      note.timeOffset, note.durationScale,
+                                                      newGain, newDrift);
+            }
+        }
         pianoRollComponent.repaint();
     };
 
@@ -171,9 +237,12 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     playButton.setTooltip ("Play/stop edited audio (Space)");
     undoButton.setTooltip ("Undo last edit (Cmd+Z)");
     redoButton.setTooltip ("Redo last edit (Cmd+Shift+Z)");
-    quantizeButton.setTooltip ("Snap all notes to nearest semitone (Q)");
+    quantizeButton.setTooltip ("Snap notes to scale (Q)");
     resetButton.setTooltip ("Reset all edits to original");
     alignButton.setTooltip ("Align active take to reference using DTW");
+    scaleRootSelector.setTooltip ("Scale root note");
+    scaleTypeSelector.setTooltip ("Scale type");
+    quantizeStrengthSlider.setTooltip ("Quantize strength (0-100%)");
 
     setResizable (true, true);
     setResizeLimits (700, 500, 1800, 1200);
@@ -207,6 +276,15 @@ void InKeyEditor::paint (juce::Graphics& g)
     auto topBar = getLocalBounds().removeFromTop (50).toFloat();
     InKeyLookAndFeel::drawGlassPanel (g, topBar, 0.0f, true);
 
+    // Glass scale bar (second row)
+    if (scaleRootSelector.isVisible())
+    {
+        auto scaleBar = getLocalBounds().toFloat();
+        scaleBar.removeFromTop (50.0f);
+        scaleBar = scaleBar.removeFromTop (32.0f);
+        InKeyLookAndFeel::drawGlassPanel (g, scaleBar, 0.0f, false);
+    }
+
     // Glass properties panel
     if (propertiesPanel.isVisible())
     {
@@ -228,7 +306,7 @@ void InKeyEditor::resized()
 {
     auto area = getLocalBounds();
 
-    // Top bar
+    // Top bar row 1: main controls
     auto topBar = area.removeFromTop (50);
     topBar.removeFromLeft (260);
     captureButton.setBounds (topBar.removeFromLeft (110).reduced (10, 10));
@@ -246,14 +324,22 @@ void InKeyEditor::resized()
 
     statusLabel.setBounds (topBar.reduced (10, 0));
 
+    // Top bar row 2: scale/quantize controls (only visible in EDITING with piano roll)
+    auto scaleBar = area.removeFromTop (32);
+    scaleBar.removeFromLeft (260);
+    scaleRootSelector.setBounds (scaleBar.removeFromLeft (65).reduced (4, 4));
+    scaleTypeSelector.setBounds (scaleBar.removeFromLeft (120).reduced (4, 4));
+    scaleBar.removeFromLeft (8);
+    quantizeStrengthSlider.setBounds (scaleBar.removeFromLeft (150).reduced (4, 4));
+
     // Properties panel at bottom
     static constexpr int propertiesHeight = 44;
     auto propertiesArea = area.removeFromBottom (propertiesHeight);
     propertiesPanel.setBounds (propertiesArea);
 
     // Display area
-    area.removeFromTop (4);
-    auto displayArea = area.reduced (10, 6);
+    area.removeFromTop (2);
+    auto displayArea = area.reduced (10, 4);
 
     waveformComponent.setBounds (displayArea);
     pitchCurveComponent.setBounds (displayArea);
@@ -277,6 +363,9 @@ void InKeyEditor::timerCallback()
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
         propertiesPanel.setVisible (false);
+        scaleRootSelector.setVisible (false);
+        scaleTypeSelector.setVisible (false);
+        quantizeStrengthSlider.setVisible (false);
 
         auto duration = processorRef.getAudioCapture().getCapturedDurationSeconds();
         statusLabel.setText ("Recording... " + juce::String (duration, 1) + "s",
@@ -307,6 +396,9 @@ void InKeyEditor::timerCallback()
         quantizeButton.setVisible (showPianoRoll);
         resetButton.setVisible (showPianoRoll);
         propertiesPanel.setVisible (showPianoRoll);
+        scaleRootSelector.setVisible (showPianoRoll);
+        scaleTypeSelector.setVisible (showPianoRoll);
+        quantizeStrengthSlider.setVisible (showPianoRoll);
 
         // Show take selector and align button when there are 2+ takes
         bool multiTake = processorRef.getNumTakes() > 1;
@@ -334,9 +426,15 @@ void InKeyEditor::timerCallback()
 
         info += juce::String (numNotes) + " notes";
 
-        int selectedId = pianoRollComponent.getSelectedNoteId();
-        if (selectedId >= 0)
+        // Show selection info
+        const auto& selectedIds = pianoRollComponent.getSelectedNoteIds();
+        if (selectedIds.size() > 1)
         {
+            info += " | " + juce::String (static_cast<int> (selectedIds.size())) + " selected";
+        }
+        else if (selectedIds.size() == 1)
+        {
+            int selectedId = *selectedIds.begin();
             for (const auto& note : pianoRollComponent.getNotes())
             {
                 if (note.id == selectedId)
@@ -347,8 +445,12 @@ void InKeyEditor::timerCallback()
 
                     if (std::abs (note.pitchShiftSemitones) > 0.01f)
                     {
-                        int shift = static_cast<int> (std::round (note.pitchShiftSemitones));
-                        info += " (" + juce::String (shift > 0 ? "+" : "") + juce::String (shift) + " st)";
+                        int wholeSt = static_cast<int> (std::round (note.pitchShiftSemitones));
+                        float cents = (note.pitchShiftSemitones - static_cast<float> (wholeSt)) * 100.0f;
+                        juce::String shiftStr = (wholeSt > 0 ? "+" : "") + juce::String (wholeSt) + " st";
+                        if (std::abs (cents) > 0.5f)
+                            shiftStr += " " + juce::String (static_cast<int> (cents)) + "c";
+                        info += " (" + shiftStr + ")";
                     }
                     else
                     {
@@ -372,6 +474,9 @@ void InKeyEditor::timerCallback()
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
         alignButton.setVisible (false);
+        scaleRootSelector.setVisible (false);
+        scaleTypeSelector.setVisible (false);
+        quantizeStrengthSlider.setVisible (false);
 
         double pos = processorRef.getAudioEngine().getPlaybackPosition();
         pianoRollComponent.setPlayheadPosition (pos);
@@ -392,6 +497,9 @@ void InKeyEditor::timerCallback()
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
         propertiesPanel.setVisible (false);
+        scaleRootSelector.setVisible (false);
+        scaleTypeSelector.setVisible (false);
+        quantizeStrengthSlider.setVisible (false);
 
         statusLabel.setText ("Ready — press Capture to record", juce::dontSendNotification);
     }
@@ -427,19 +535,36 @@ void InKeyEditor::analysisProgress (float /*progress*/)
 
 void InKeyEditor::noteSelected (const Note* note)
 {
-    propertiesPanel.setSelectedNote (note);
+    // Called for single selection or first selected note
+    // Full selection handling is in selectionChanged
+    (void) note;
+}
+
+void InKeyEditor::selectionChanged (const std::set<int>& selectedIds)
+{
+    updatePropertiesFromSelection();
+    (void) selectedIds;
 }
 
 void InKeyEditor::noteEdited (const Note& note)
 {
-    propertiesPanel.setSelectedNote (&note);
+    updatePropertiesFromSelection();
+    (void) note;
 }
 
 void InKeyEditor::updatePropertiesFromSelection()
 {
-    int selectedId = pianoRollComponent.getSelectedNoteId();
-    if (selectedId >= 0)
+    const auto& selectedIds = pianoRollComponent.getSelectedNoteIds();
+
+    if (selectedIds.empty())
     {
+        propertiesPanel.setSelectedNote (nullptr);
+        return;
+    }
+
+    if (selectedIds.size() == 1)
+    {
+        int selectedId = *selectedIds.begin();
         for (const auto& note : pianoRollComponent.getNotes())
         {
             if (note.id == selectedId)
@@ -448,8 +573,18 @@ void InKeyEditor::updatePropertiesFromSelection()
                 return;
             }
         }
+        propertiesPanel.setSelectedNote (nullptr);
+        return;
     }
-    propertiesPanel.setSelectedNote (nullptr);
+
+    // Multiple selection
+    std::vector<const Note*> selectedNotes;
+    for (const auto& note : pianoRollComponent.getNotes())
+    {
+        if (selectedIds.count (note.id))
+            selectedNotes.push_back (&note);
+    }
+    propertiesPanel.setSelectedNotes (selectedNotes);
 }
 
 void InKeyEditor::updateTakeSelector()
@@ -510,6 +645,24 @@ void InKeyEditor::performAlignment()
     }
 }
 
+ScaleDefinition InKeyEditor::getCurrentScale() const
+{
+    int root = scaleRootSelector.getSelectedId() - 1;
+    if (root < 0) root = 0;
+
+    switch (scaleTypeSelector.getSelectedId())
+    {
+        case 2:  return QuantizationEngine::majorScale (root);
+        case 3:  return QuantizationEngine::naturalMinorScale (root);
+        case 4:  return QuantizationEngine::harmonicMinorScale (root);
+        case 5:  return QuantizationEngine::pentatonicScale (root);
+        case 6:  return QuantizationEngine::bluesScale (root);
+        case 7:  return QuantizationEngine::dorianScale (root);
+        case 8:  return QuantizationEngine::mixolydianScale (root);
+        default: return QuantizationEngine::chromaticScale (root);
+    }
+}
+
 bool InKeyEditor::keyPressed (const juce::KeyPress& key)
 {
     auto state = processorRef.getState();
@@ -544,10 +697,12 @@ bool InKeyEditor::keyPressed (const juce::KeyPress& key)
         }
     }
 
-    // Q = Quantize pitch
+    // Q = Quantize pitch (using current scale/strength settings)
     if (key == juce::KeyPress ('q') && showPianoRoll && state == PluginState::EDITING)
     {
-        pianoRollComponent.quantizePitch();
+        float strength = static_cast<float> (quantizeStrengthSlider.getValue()) / 100.0f;
+        auto scale = getCurrentScale();
+        pianoRollComponent.quantizePitchToScale (strength, scale);
         pianoRollComponent.repaint();
         updatePropertiesFromSelection();
         return true;
@@ -560,7 +715,7 @@ bool InKeyEditor::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
-    // Escape = Deselect
+    // Escape = Stop playback
     if (key == juce::KeyPress::escapeKey)
     {
         if (state == PluginState::PLAYING)

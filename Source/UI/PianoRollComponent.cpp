@@ -1,6 +1,7 @@
 #include "PianoRollComponent.h"
 #include "InKeyLookAndFeel.h"
 #include <cmath>
+#include <algorithm>
 
 PianoRollComponent::PianoRollComponent()
 {
@@ -13,9 +14,17 @@ void PianoRollComponent::setData (const NoteList& newNotes, const PitchCurve& ne
     notes = newNotes;
     pitchCurve = newPitchCurve;
     totalDuration = audioDuration;
-    selectedNoteId = -1;
+    selectedNoteIds.clear();
     playheadTime = -1.0;
     undoManager.clearUndoHistory();
+
+    // Track next note ID for split/merge
+    nextNoteId = 1;
+    for (const auto& note : notes)
+    {
+        if (note.id >= nextNoteId)
+            nextNoteId = note.id + 1;
+    }
 
     // Auto-fit view to the data
     viewStartTime = 0.0;
@@ -51,7 +60,7 @@ void PianoRollComponent::clear()
     notes.clear();
     pitchCurve.clear();
     totalDuration = 0.0;
-    selectedNoteId = -1;
+    selectedNoteIds.clear();
     playheadTime = -1.0;
     undoManager.clearUndoHistory();
     repaint();
@@ -108,7 +117,8 @@ void PianoRollComponent::zoomToFit()
 }
 
 void PianoRollComponent::editNoteProperty (int noteId, float pitchShift, float formantShift,
-                                            double timeOffset, double durationScale)
+                                            double timeOffset, double durationScale,
+                                            float gainDB, float pitchDriftScale)
 {
     for (auto& note : notes)
     {
@@ -119,12 +129,16 @@ void PianoRollComponent::editNoteProperty (int noteId, float pitchShift, float f
             before.formantShiftSemitones = note.formantShiftSemitones;
             before.timeOffset = note.timeOffset;
             before.durationScale = note.durationScale;
+            before.gainDB = note.gainDB;
+            before.pitchDriftScale = note.pitchDriftScale;
 
             NoteEditAction::EditState after;
             after.pitchShiftSemitones = pitchShift;
             after.formantShiftSemitones = formantShift;
             after.timeOffset = timeOffset;
             after.durationScale = durationScale;
+            after.gainDB = gainDB;
+            after.pitchDriftScale = pitchDriftScale;
 
             undoManager.perform (
                 new NoteEditAction (notes, noteId, before, after,
@@ -139,7 +153,14 @@ void PianoRollComponent::editNoteProperty (int noteId, float pitchShift, float f
 
 void PianoRollComponent::quantizePitch()
 {
-    if (notes.empty())
+    // Default: chromatic, full strength
+    auto chromatic = QuantizationEngine::chromaticScale (0);
+    quantizePitchToScale (1.0f, chromatic);
+}
+
+void PianoRollComponent::quantizePitchToScale (float strength, const ScaleDefinition& scale)
+{
+    if (notes.empty() || strength <= 0.0f)
         return;
 
     std::vector<BatchNoteEditAction::NoteSnapshot> beforeStates;
@@ -147,27 +168,36 @@ void PianoRollComponent::quantizePitch()
 
     for (const auto& note : notes)
     {
+        // If multi-select is active, only quantize selected notes
+        if (! selectedNoteIds.empty() && selectedNoteIds.count (note.id) == 0)
+            continue;
+
         BatchNoteEditAction::NoteSnapshot before;
         before.id = note.id;
         before.state.pitchShiftSemitones = note.pitchShiftSemitones;
         before.state.formantShiftSemitones = note.formantShiftSemitones;
         before.state.timeOffset = note.timeOffset;
         before.state.durationScale = note.durationScale;
+        before.state.gainDB = note.gainDB;
+        before.state.pitchDriftScale = note.pitchDriftScale;
         beforeStates.push_back (before);
 
-        // Calculate the correction needed to snap to nearest semitone
-        float exactMidi = 69.0f + 12.0f * std::log2 (note.originalPitch / 440.0f);
-        float correction = std::round (exactMidi) - exactMidi;
+        // Calculate correction using the QuantizationEngine
+        float correction = QuantizationEngine::calculateCorrection (
+            note.originalPitch, strength, scale);
 
         BatchNoteEditAction::NoteSnapshot after = before;
         after.state.pitchShiftSemitones = correction;
         afterStates.push_back (after);
     }
 
-    undoManager.perform (
-        new BatchNoteEditAction (notes, beforeStates, afterStates,
-                                  [this]() { repaint(); }),
-        "Quantize Pitch");
+    if (! beforeStates.empty())
+    {
+        undoManager.perform (
+            new BatchNoteEditAction (notes, beforeStates, afterStates,
+                                      [this]() { repaint(); }),
+            "Quantize Pitch");
+    }
 }
 
 void PianoRollComponent::resetAllEdits()
@@ -186,14 +216,13 @@ void PianoRollComponent::resetAllEdits()
         before.state.formantShiftSemitones = note.formantShiftSemitones;
         before.state.timeOffset = note.timeOffset;
         before.state.durationScale = note.durationScale;
+        before.state.gainDB = note.gainDB;
+        before.state.pitchDriftScale = note.pitchDriftScale;
         beforeStates.push_back (before);
 
         BatchNoteEditAction::NoteSnapshot after;
         after.id = note.id;
-        after.state.pitchShiftSemitones = 0.0f;
-        after.state.formantShiftSemitones = 0.0f;
-        after.state.timeOffset = 0.0;
-        after.state.durationScale = 1.0;
+        // EditState defaults are all zeros/1.0 which is what we want
         afterStates.push_back (after);
     }
 
@@ -201,6 +230,52 @@ void PianoRollComponent::resetAllEdits()
         new BatchNoteEditAction (notes, beforeStates, afterStates,
                                   [this]() { repaint(); }),
         "Reset All Edits");
+}
+
+// --- Selection ---
+
+int PianoRollComponent::getSelectedNoteId() const
+{
+    if (selectedNoteIds.empty())
+        return -1;
+    return *selectedNoteIds.begin();
+}
+
+void PianoRollComponent::selectAllNotes()
+{
+    selectedNoteIds.clear();
+    for (const auto& note : notes)
+        selectedNoteIds.insert (note.id);
+    notifySelectionChanged();
+    repaint();
+}
+
+void PianoRollComponent::deselectAll()
+{
+    selectedNoteIds.clear();
+    notifySelectionChanged();
+    repaint();
+}
+
+void PianoRollComponent::notifySelectionChanged()
+{
+    const Note* firstNote = getFirstSelectedNote();
+    listeners.call ([firstNote] (Listener& l) { l.noteSelected (firstNote); });
+    listeners.call ([this] (Listener& l) { l.selectionChanged (selectedNoteIds); });
+}
+
+const Note* PianoRollComponent::getFirstSelectedNote() const
+{
+    if (selectedNoteIds.empty())
+        return nullptr;
+
+    int firstId = *selectedNoteIds.begin();
+    for (const auto& note : notes)
+    {
+        if (note.id == firstId)
+            return &note;
+    }
+    return nullptr;
 }
 
 // --- Paint ---
@@ -225,8 +300,8 @@ void PianoRollComponent::paint (juce::Graphics& g)
 
     drawGrid (g);
     drawPianoKeys (g);
-    drawPitchCurve (g);
     drawNotes (g);
+    drawLasso (g);
     drawPlayhead (g);
 
     // Time ruler at top
@@ -264,6 +339,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
 {
     auto gridArea = getGridArea();
 
+    // Panning: middle-click or Alt+click
     if (event.mods.isMiddleButtonDown() || event.mods.isAltDown())
     {
         isPanning = true;
@@ -273,15 +349,139 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
         return;
     }
 
+    // Right-click context menu
+    if (event.mods.isPopupMenu())
+    {
+        auto* rightClickNote = noteAtPoint (event.position);
+
+        // If right-clicking on a note that isn't selected, select it
+        if (rightClickNote != nullptr && ! selectedNoteIds.count (rightClickNote->id))
+        {
+            selectedNoteIds.clear();
+            selectedNoteIds.insert (rightClickNote->id);
+            notifySelectionChanged();
+            repaint();
+        }
+
+        juce::PopupMenu menu;
+        menu.addItem (1, "Select All", true);
+        menu.addSeparator();
+        menu.addItem (2, "Quantize Selected", ! selectedNoteIds.empty());
+        menu.addItem (3, "Reset Edits", ! selectedNoteIds.empty());
+        menu.addSeparator();
+
+        bool canSplit = (rightClickNote != nullptr && selectedNoteIds.size() == 1);
+        menu.addItem (4, "Split Note Here", canSplit);
+
+        // Check if selected notes are adjacent for merge
+        bool canMerge = false;
+        if (selectedNoteIds.size() >= 2)
+        {
+            std::vector<const Note*> sel;
+            for (const auto& n : notes)
+                if (selectedNoteIds.count (n.id))
+                    sel.push_back (&n);
+
+            std::sort (sel.begin(), sel.end(),
+                [] (const Note* a, const Note* b) { return a->startTime < b->startTime; });
+
+            canMerge = true;
+            for (size_t i = 1; i < sel.size(); ++i)
+            {
+                if (sel[i]->startTime - sel[i - 1]->endTime() > 0.05)
+                {
+                    canMerge = false;
+                    break;
+                }
+            }
+        }
+        menu.addItem (5, "Merge Notes", canMerge);
+
+        double clickTime = xToTime (event.position.x);
+
+        menu.showMenuAsync (juce::PopupMenu::Options(),
+            [this, rightClickNote, clickTime] (int result)
+            {
+                switch (result)
+                {
+                    case 1: selectAllNotes(); break;
+                    case 2: quantizePitch(); repaint(); break;
+                    case 3:
+                    {
+                        // Reset edits on selected notes
+                        std::vector<BatchNoteEditAction::NoteSnapshot> befores, afters;
+                        for (const auto& note : notes)
+                        {
+                            if (selectedNoteIds.count (note.id) && note.isEdited())
+                            {
+                                BatchNoteEditAction::NoteSnapshot b;
+                                b.id = note.id;
+                                b.state.pitchShiftSemitones = note.pitchShiftSemitones;
+                                b.state.formantShiftSemitones = note.formantShiftSemitones;
+                                b.state.timeOffset = note.timeOffset;
+                                b.state.durationScale = note.durationScale;
+                                b.state.gainDB = note.gainDB;
+                                b.state.pitchDriftScale = note.pitchDriftScale;
+                                befores.push_back (b);
+
+                                BatchNoteEditAction::NoteSnapshot a;
+                                a.id = note.id;
+                                afters.push_back (a);
+                            }
+                        }
+                        if (! befores.empty())
+                        {
+                            undoManager.perform (
+                                new BatchNoteEditAction (notes, befores, afters,
+                                    [this]() { repaint(); }),
+                                "Reset Selected");
+                            repaint();
+                            notifySelectionChanged();
+                        }
+                        break;
+                    }
+                    case 4:
+                        if (rightClickNote != nullptr)
+                            splitNoteAtTime (rightClickNote->id, clickTime);
+                        break;
+                    case 5:
+                        mergeSelectedNotes();
+                        break;
+                    default: break;
+                }
+            });
+        return;
+    }
+
     if (gridArea.contains (event.position))
     {
         auto* clickedNote = noteAtPoint (event.position);
+
         if (clickedNote != nullptr)
         {
-            selectedNoteId = clickedNote->id;
-            listeners.call ([clickedNote] (Listener& l) { l.noteSelected (clickedNote); });
+            bool isShiftOrCmd = event.mods.isShiftDown() || event.mods.isCommandDown();
 
-            // Determine drag mode based on click position
+            if (isShiftOrCmd)
+            {
+                // Toggle this note in/out of selection
+                if (selectedNoteIds.count (clickedNote->id))
+                    selectedNoteIds.erase (clickedNote->id);
+                else
+                    selectedNoteIds.insert (clickedNote->id);
+            }
+            else
+            {
+                // If clicking an already-selected note, keep the multi-selection for dragging
+                if (! selectedNoteIds.count (clickedNote->id))
+                {
+                    selectedNoteIds.clear();
+                    selectedNoteIds.insert (clickedNote->id);
+                }
+            }
+
+            notifySelectionChanged();
+
+            // Set up drag
             dragMode = edgeAtPoint (*clickedNote, event.position);
             dragNoteId = clickedNote->id;
             dragStartX = event.position.x;
@@ -290,17 +490,49 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
             dragOriginalTimeOffset = clickedNote->timeOffset;
             dragOriginalDurationScale = clickedNote->durationScale;
 
-            // Store state before drag for undo
+            // Store state before drag for undo (single note for resize)
             dragBeforeState.pitchShiftSemitones = clickedNote->pitchShiftSemitones;
             dragBeforeState.formantShiftSemitones = clickedNote->formantShiftSemitones;
             dragBeforeState.timeOffset = clickedNote->timeOffset;
             dragBeforeState.durationScale = clickedNote->durationScale;
+            dragBeforeState.gainDB = clickedNote->gainDB;
+            dragBeforeState.pitchDriftScale = clickedNote->pitchDriftScale;
+
+            // Store all selected notes' state for multi-drag
+            if (dragMode == DragMode::MoveNote && selectedNoteIds.size() > 1)
+            {
+                multiDragBeforeStates.clear();
+                for (const auto& note : notes)
+                {
+                    if (selectedNoteIds.count (note.id))
+                    {
+                        NoteEditAction::EditState state;
+                        state.pitchShiftSemitones = note.pitchShiftSemitones;
+                        state.formantShiftSemitones = note.formantShiftSemitones;
+                        state.timeOffset = note.timeOffset;
+                        state.durationScale = note.durationScale;
+                        state.gainDB = note.gainDB;
+                        state.pitchDriftScale = note.pitchDriftScale;
+                        multiDragBeforeStates[note.id] = state;
+                    }
+                }
+            }
         }
         else
         {
-            selectedNoteId = -1;
+            // Clicked empty space — start lasso or deselect
+            bool isShiftOrCmd = event.mods.isShiftDown() || event.mods.isCommandDown();
+
+            if (! isShiftOrCmd)
+                selectedNoteIds.clear();
+
+            isLassoing = true;
+            lassoStart = event.position;
+            lassoRect = {};
+            preLassoSelection = selectedNoteIds;
+
             dragMode = DragMode::None;
-            listeners.call ([] (Listener& l) { l.noteSelected (nullptr); });
+            notifySelectionChanged();
         }
         repaint();
     }
@@ -308,18 +540,32 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& event)
 
 void PianoRollComponent::mouseUp (const juce::MouseEvent& /*event*/)
 {
+    if (isLassoing)
+    {
+        isLassoing = false;
+        lassoRect = {};
+        repaint();
+    }
+
     if (dragMode != DragMode::None && dragNoteId >= 0)
     {
-        // Record undo action if the note actually changed
-        recordDragUndo (dragNoteId);
-
-        // Notify listener about the edit
-        for (auto& note : notes)
+        if (dragMode == DragMode::MoveNote && selectedNoteIds.size() > 1)
         {
-            if (note.id == dragNoteId)
+            // Record multi-drag undo
+            recordMultiDragUndo();
+        }
+        else
+        {
+            // Record single-note undo
+            recordDragUndo (dragNoteId);
+
+            for (auto& note : notes)
             {
-                listeners.call ([&note] (Listener& l) { l.noteEdited (note); });
-                break;
+                if (note.id == dragNoteId)
+                {
+                    listeners.call ([&note] (Listener& l) { l.noteEdited (note); });
+                    break;
+                }
             }
         }
     }
@@ -327,6 +573,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent& /*event*/)
     dragMode = DragMode::None;
     dragNoteId = -1;
     isPanning = false;
+    multiDragBeforeStates.clear();
 }
 
 void PianoRollComponent::mouseMove (const juce::MouseEvent& event)
@@ -366,12 +613,68 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
         return;
     }
 
+    // Lasso selection
+    if (isLassoing)
+    {
+        float x1 = juce::jmin (lassoStart.x, event.position.x);
+        float y1 = juce::jmin (lassoStart.y, event.position.y);
+        float x2 = juce::jmax (lassoStart.x, event.position.x);
+        float y2 = juce::jmax (lassoStart.y, event.position.y);
+        lassoRect = { x1, y1, x2 - x1, y2 - y1 };
+
+        // Find all notes intersecting the lasso
+        selectedNoteIds = preLassoSelection;
+        for (const auto& note : notes)
+        {
+            auto noteRect = getNoteRect (note);
+            if (lassoRect.intersects (noteRect))
+                selectedNoteIds.insert (note.id);
+        }
+
+        notifySelectionChanged();
+        repaint();
+        return;
+    }
+
     if (dragMode == DragMode::None || dragNoteId < 0)
         return;
 
     float dy = event.position.y - dragStartY;
     float dx = event.position.x - dragStartX;
 
+    // Multi-note move
+    if (dragMode == DragMode::MoveNote && selectedNoteIds.size() > 1)
+    {
+        float semitonesPerPixel = static_cast<float> (viewTopMidi - viewBottomMidi) / getGridArea().getHeight();
+        float semitonesDelta = -dy * semitonesPerPixel;
+        double timeDelta = static_cast<double> (dx) / getGridArea().getWidth() * viewDuration;
+
+        // Fine pitch: Shift held = cent-level, otherwise snap to semitones
+        if (! event.mods.isShiftDown())
+            semitonesDelta = std::round (semitonesDelta);
+        else
+            semitonesDelta = std::round (semitonesDelta * 100.0f) / 100.0f;
+
+        for (auto& note : notes)
+        {
+            auto it = multiDragBeforeStates.find (note.id);
+            if (it == multiDragBeforeStates.end())
+                continue;
+
+            float newPitchShift = it->second.pitchShiftSemitones + semitonesDelta;
+            newPitchShift = juce::jlimit (-24.0f, 24.0f, newPitchShift);
+            note.pitchShiftSemitones = newPitchShift;
+
+            double newTimeOffset = it->second.timeOffset + timeDelta;
+            newTimeOffset = juce::jmax (-note.startTime, newTimeOffset);
+            note.timeOffset = newTimeOffset;
+        }
+
+        repaint();
+        return;
+    }
+
+    // Single-note drag (or single-note resize)
     for (auto& note : notes)
     {
         if (note.id != dragNoteId)
@@ -382,8 +685,14 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
             // Vertical: pitch shift
             float semitonesPerPixel = static_cast<float> (viewTopMidi - viewBottomMidi) / getGridArea().getHeight();
             float semitonesDelta = -dy * semitonesPerPixel;
+
+            // Fine pitch: Shift held = cent-level, otherwise snap to semitones
+            if (! event.mods.isShiftDown())
+                semitonesDelta = std::round (semitonesDelta);
+            else
+                semitonesDelta = std::round (semitonesDelta * 100.0f) / 100.0f;
+
             float newPitchShift = dragOriginalPitchShift + semitonesDelta;
-            newPitchShift = std::round (newPitchShift);
             newPitchShift = juce::jlimit (-24.0f, 24.0f, newPitchShift);
             note.pitchShiftSemitones = newPitchShift;
 
@@ -395,7 +704,6 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
         }
         else if (dragMode == DragMode::ResizeLeft)
         {
-            // Dragging left edge: changes start time and duration, keeps right edge fixed
             double timeDelta = static_cast<double> (dx) / getGridArea().getWidth() * viewDuration;
             double newTimeOffset = dragOriginalTimeOffset + timeDelta;
             newTimeOffset = juce::jmax (-note.startTime, newTimeOffset);
@@ -412,7 +720,6 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
         }
         else if (dragMode == DragMode::ResizeRight)
         {
-            // Dragging right edge: changes duration only
             double timeDelta = static_cast<double> (dx) / getGridArea().getWidth() * viewDuration;
             double newEditedDuration = note.duration * dragOriginalDurationScale + timeDelta;
 
@@ -462,6 +769,7 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& event,
 
 bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
 {
+    // Cmd+Z = Undo
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0))
     {
         if (undoManager.canUndo())
@@ -472,6 +780,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
         }
     }
 
+    // Cmd+Shift+Z = Redo
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
     {
         if (undoManager.canRedo())
@@ -482,19 +791,49 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
         }
     }
 
-    // Delete/Backspace resets selected note's edits
+    // Cmd+A = Select all
+    if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0))
+    {
+        selectAllNotes();
+        return true;
+    }
+
+    // Delete/Backspace = reset selected notes' edits
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
     {
-        if (selectedNoteId >= 0)
+        if (! selectedNoteIds.empty())
         {
+            std::vector<BatchNoteEditAction::NoteSnapshot> beforeStates;
+            std::vector<BatchNoteEditAction::NoteSnapshot> afterStates;
+
             for (const auto& note : notes)
             {
-                if (note.id == selectedNoteId && note.isEdited())
+                if (selectedNoteIds.count (note.id) && note.isEdited())
                 {
-                    editNoteProperty (note.id, 0.0f, 0.0f, 0.0, 1.0);
-                    repaint();
-                    return true;
+                    BatchNoteEditAction::NoteSnapshot before;
+                    before.id = note.id;
+                    before.state.pitchShiftSemitones = note.pitchShiftSemitones;
+                    before.state.formantShiftSemitones = note.formantShiftSemitones;
+                    before.state.timeOffset = note.timeOffset;
+                    before.state.durationScale = note.durationScale;
+                    before.state.gainDB = note.gainDB;
+                    before.state.pitchDriftScale = note.pitchDriftScale;
+                    beforeStates.push_back (before);
+
+                    BatchNoteEditAction::NoteSnapshot after;
+                    after.id = note.id;
+                    afterStates.push_back (after);
                 }
+            }
+
+            if (! beforeStates.empty())
+            {
+                undoManager.perform (
+                    new BatchNoteEditAction (notes, beforeStates, afterStates,
+                                              [this]() { repaint(); }),
+                    "Reset Selected");
+                repaint();
+                return true;
             }
         }
     }
@@ -554,16 +893,17 @@ juce::Rectangle<float> PianoRollComponent::getGridArea() const
                                     static_cast<float> (getHeight()) - headerHeight);
 }
 
-// --- Note rect helper (uses edited positions) ---
+// --- Note rect helper (uses edited positions + sub-semitone positioning) ---
 
 juce::Rectangle<float> PianoRollComponent::getNoteRect (const Note& note) const
 {
-    int displayMidi = note.midiNote + static_cast<int> (std::round (note.pitchShiftSemitones));
-    displayMidi = juce::jlimit (0, 127, displayMidi);
+    // Use float MIDI for sub-semitone positioning
+    float displayMidiFloat = static_cast<float> (note.midiNote) + note.pitchShiftSemitones;
+    displayMidiFloat = juce::jlimit (0.0f, 127.0f, displayMidiFloat);
 
     float x = timeToX (note.editedStartTime());
     float w = timeToX (note.editedStartTime() + note.editedDuration()) - x;
-    float y = midiToY (displayMidi + 1);
+    float y = midiToY (displayMidiFloat + 1.0f);
     float h = noteHeight();
 
     w = juce::jmax (2.0f, w);
@@ -600,12 +940,15 @@ void PianoRollComponent::recordDragUndo (int noteId)
             afterState.formantShiftSemitones = note.formantShiftSemitones;
             afterState.timeOffset = note.timeOffset;
             afterState.durationScale = note.durationScale;
+            afterState.gainDB = note.gainDB;
+            afterState.pitchDriftScale = note.pitchDriftScale;
 
             // Only record if something actually changed
             if (std::abs (afterState.pitchShiftSemitones - dragBeforeState.pitchShiftSemitones) > 0.001f
                 || std::abs (afterState.formantShiftSemitones - dragBeforeState.formantShiftSemitones) > 0.001f
                 || std::abs (afterState.timeOffset - dragBeforeState.timeOffset) > 0.0001
-                || std::abs (afterState.durationScale - dragBeforeState.durationScale) > 0.0001)
+                || std::abs (afterState.durationScale - dragBeforeState.durationScale) > 0.0001
+                || std::abs (afterState.gainDB - dragBeforeState.gainDB) > 0.01f)
             {
                 undoManager.perform (
                     new NoteEditAction (notes, noteId, dragBeforeState, afterState,
@@ -614,6 +957,48 @@ void PianoRollComponent::recordDragUndo (int noteId)
             }
             break;
         }
+    }
+}
+
+void PianoRollComponent::recordMultiDragUndo()
+{
+    std::vector<BatchNoteEditAction::NoteSnapshot> beforeStates;
+    std::vector<BatchNoteEditAction::NoteSnapshot> afterStates;
+
+    bool anyChanged = false;
+
+    for (const auto& note : notes)
+    {
+        auto it = multiDragBeforeStates.find (note.id);
+        if (it == multiDragBeforeStates.end())
+            continue;
+
+        BatchNoteEditAction::NoteSnapshot before;
+        before.id = note.id;
+        before.state = it->second;
+        beforeStates.push_back (before);
+
+        BatchNoteEditAction::NoteSnapshot after;
+        after.id = note.id;
+        after.state.pitchShiftSemitones = note.pitchShiftSemitones;
+        after.state.formantShiftSemitones = note.formantShiftSemitones;
+        after.state.timeOffset = note.timeOffset;
+        after.state.durationScale = note.durationScale;
+        after.state.gainDB = note.gainDB;
+        after.state.pitchDriftScale = note.pitchDriftScale;
+        afterStates.push_back (after);
+
+        if (std::abs (before.state.pitchShiftSemitones - after.state.pitchShiftSemitones) > 0.001f
+            || std::abs (before.state.timeOffset - after.state.timeOffset) > 0.0001)
+            anyChanged = true;
+    }
+
+    if (anyChanged && ! beforeStates.empty())
+    {
+        undoManager.perform (
+            new BatchNoteEditAction (notes, beforeStates, afterStates,
+                                      [this]() { repaint(); }),
+            "Multi Drag Edit");
     }
 }
 
@@ -635,6 +1020,17 @@ void PianoRollComponent::drawGrid (juce::Graphics& g)
         {
             g.setColour (InKeyColours::blackKeyBg);
             g.fillRect (gridArea.getX(), y, gridArea.getWidth(), noteHeight());
+        }
+
+        // Scale shading: tint out-of-scale rows
+        if (currentScale.degrees.size() == 12)
+        {
+            int degreeIndex = ((noteInOctave - currentScale.rootNote) + 12) % 12;
+            if (! currentScale.degrees[static_cast<size_t> (degreeIndex)])
+            {
+                g.setColour (juce::Colour (0x08ff4466));  // subtle red tint for out-of-scale
+                g.fillRect (gridArea.getX(), y, gridArea.getWidth(), noteHeight());
+            }
         }
 
         if (noteInOctave == 0)
@@ -718,13 +1114,15 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
         if (editedEnd < viewStartTime || note.editedStartTime() > viewStartTime + viewDuration)
             continue;
 
-        int displayMidi = note.midiNote + static_cast<int> (std::round (note.pitchShiftSemitones));
+        float displayMidiFloat = static_cast<float> (note.midiNote) + note.pitchShiftSemitones;
+        int displayMidi = static_cast<int> (std::round (displayMidiFloat));
         displayMidi = juce::jlimit (0, 127, displayMidi);
 
-        if (displayMidi < viewBottomMidi || displayMidi > viewTopMidi)
+        if (displayMidiFloat < static_cast<float> (viewBottomMidi) - 1.0f
+            || displayMidiFloat > static_cast<float> (viewTopMidi) + 1.0f)
             continue;
 
-        bool isSelected = (note.id == selectedNoteId);
+        bool isSelected = selectedNoteIds.count (note.id) > 0;
         bool edited = note.isEdited();
 
         // Chromatic rainbow colour
@@ -741,6 +1139,9 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
         // Note body
         g.setColour (fillColour);
         g.fillRoundedRectangle (rect, 3.0f);
+
+        // Draw pitch curve inside note (Melodyne-style)
+        drawNotePitchCurve (g, note, rect);
 
         // Border
         g.setColour (borderColour);
@@ -780,6 +1181,18 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
             g.fillPath (dashedPath);
         }
 
+        // Volume indicator bar at bottom of note
+        if (std::abs (note.gainDB) > 0.1f && rect.getWidth() > 6.0f)
+        {
+            float barHeight = 3.0f;
+            auto barRect = juce::Rectangle<float> (rect.getX() + 2.0f, rect.getBottom() - barHeight - 1.0f,
+                                                    rect.getWidth() - 4.0f, barHeight);
+            auto barColour = note.gainDB > 0.0f ? juce::Colour (0x8044cc66) : juce::Colour (0x80ff4466);
+            float fraction = juce::jlimit (0.0f, 1.0f, std::abs (note.gainDB) / 24.0f);
+            g.setColour (barColour);
+            g.fillRect (barRect.withWidth (barRect.getWidth() * fraction));
+        }
+
         // Note name label
         if (rect.getWidth() > 30.0f && h > 10.0f)
         {
@@ -791,8 +1204,14 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
 
             if (std::abs (note.pitchShiftSemitones) > 0.01f)
             {
-                int shift = static_cast<int> (std::round (note.pitchShiftSemitones));
-                noteName += (shift > 0 ? "+" : "") + juce::String (shift);
+                int wholeSemitones = static_cast<int> (std::round (note.pitchShiftSemitones));
+                float cents = (note.pitchShiftSemitones - static_cast<float> (wholeSemitones)) * 100.0f;
+
+                if (wholeSemitones != 0)
+                    noteName += (wholeSemitones > 0 ? "+" : "") + juce::String (wholeSemitones);
+
+                if (std::abs (cents) > 0.5f)
+                    noteName += juce::String (cents >= 0 ? "+" : "") + juce::String (static_cast<int> (cents)) + "c";
             }
 
             g.drawText (noteName,
@@ -803,8 +1222,88 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
     }
 }
 
+void PianoRollComponent::drawNotePitchCurve (juce::Graphics& g, const Note& note,
+                                               const juce::Rectangle<float>& rect)
+{
+    if (pitchCurve.empty() || rect.getWidth() < 8.0f)
+        return;
+
+    // Binary search for the start of this note's frames
+    auto it = std::lower_bound (pitchCurve.begin(), pitchCurve.end(), note.startTime,
+        [] (const PitchFrame& f, double t) { return f.time < t; });
+
+    // Compute average MIDI pitch within this note for drift scaling
+    float avgMidi = 0.0f;
+    int avgCount = 0;
+    if (std::abs (note.pitchDriftScale - 1.0f) > 0.01f)
+    {
+        for (auto jt = it; jt != pitchCurve.end() && jt->time <= note.endTime(); ++jt)
+        {
+            if (jt->frequency > 0.0f && jt->confidence >= 0.3f)
+            {
+                avgMidi += 69.0f + 12.0f * std::log2 (jt->frequency / 440.0f);
+                avgCount++;
+            }
+        }
+        if (avgCount > 0)
+            avgMidi /= static_cast<float> (avgCount);
+    }
+
+    g.saveState();
+    g.reduceClipRegion (rect.toNearestIntEdges());
+
+    juce::Path curvePath;
+    bool pathStarted = false;
+
+    for (; it != pitchCurve.end() && it->time <= note.endTime(); ++it)
+    {
+        const auto& frame = *it;
+
+        if (frame.frequency <= 0.0f || frame.confidence < 0.3f)
+        {
+            pathStarted = false;
+            continue;
+        }
+
+        float frameMidiFloat = 69.0f + 12.0f * std::log2 (frame.frequency / 440.0f);
+
+        // Apply pitch drift scaling: scale deviations from average
+        if (std::abs (note.pitchDriftScale - 1.0f) > 0.01f && avgCount > 0)
+        {
+            float deviation = frameMidiFloat - avgMidi;
+            frameMidiFloat = avgMidi + deviation * note.pitchDriftScale;
+        }
+
+        // Apply the note's pitch shift for display
+        float shiftedMidi = frameMidiFloat + note.pitchShiftSemitones;
+
+        // Apply time offset for display
+        float x = timeToX (frame.time + note.timeOffset);
+        float y = midiToY (shiftedMidi);
+
+        if (! pathStarted)
+        {
+            curvePath.startNewSubPath (x, y);
+            pathStarted = true;
+        }
+        else
+        {
+            curvePath.lineTo (x, y);
+        }
+    }
+
+    if (! curvePath.isEmpty())
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.55f));
+        g.strokePath (curvePath, juce::PathStrokeType (1.5f));
+    }
+
+    g.restoreState();
+}
+
 void PianoRollComponent::drawPitchCurve (juce::Graphics& g)
 {
+    // Global pitch curve overlay — drawn at reduced opacity since curves are now inside notes
     if (pitchCurve.empty())
         return;
 
@@ -833,7 +1332,7 @@ void PianoRollComponent::drawPitchCurve (juce::Graphics& g)
         float x = timeToX (frame.time);
         float y = midiToY (midiFloat);
 
-        g.setColour (juce::Colours::white.withAlpha (0.35f));
+        g.setColour (juce::Colours::white.withAlpha (0.12f));
 
         if (inSegment)
             g.drawLine (lastX, lastY, x, y, 1.0f);
@@ -842,6 +1341,27 @@ void PianoRollComponent::drawPitchCurve (juce::Graphics& g)
         lastY = y;
         inSegment = true;
     }
+}
+
+void PianoRollComponent::drawLasso (juce::Graphics& g)
+{
+    if (! isLassoing || lassoRect.isEmpty())
+        return;
+
+    // Semi-transparent fill
+    g.setColour (juce::Colour (0x18ffffff));
+    g.fillRect (lassoRect);
+
+    // Dashed border
+    g.setColour (InKeyColours::selectedGlow.withAlpha (0.5f));
+    juce::Path borderPath;
+    borderPath.addRectangle (lassoRect);
+
+    float dashLengths[] = { 6.0f, 4.0f };
+    juce::PathStrokeType strokeType (1.0f);
+    juce::Path dashedBorder;
+    strokeType.createDashedStroke (dashedBorder, borderPath, dashLengths, 2);
+    g.fillPath (dashedBorder);
 }
 
 void PianoRollComponent::drawPlayhead (juce::Graphics& g)
@@ -905,6 +1425,136 @@ const Note* PianoRollComponent::noteAtPoint (juce::Point<float> point) const
     }
 
     return nullptr;
+}
+
+// --- Note splitting and merging ---
+
+void PianoRollComponent::splitNoteAtTime (int noteId, double splitTime)
+{
+    for (const auto& note : notes)
+    {
+        if (note.id != noteId)
+            continue;
+
+        // splitTime must be within the note's original time range
+        if (splitTime <= note.startTime + 0.02 || splitTime >= note.endTime() - 0.02)
+            return;
+
+        Note first;
+        first.id = nextNoteId++;
+        first.startTime = note.startTime;
+        first.duration = splitTime - note.startTime;
+        first.originalPitch = computeAveragePitch (note.startTime, splitTime);
+        first.midiNote = Note::frequencyToMidi (first.originalPitch);
+        first.confidence = note.confidence;
+
+        Note second;
+        second.id = nextNoteId++;
+        second.startTime = splitTime;
+        second.duration = note.endTime() - splitTime;
+        second.originalPitch = computeAveragePitch (splitTime, note.endTime());
+        second.midiNote = Note::frequencyToMidi (second.originalPitch);
+        second.confidence = note.confidence;
+
+        undoManager.perform (
+            new NoteSplitAction (notes, note, first, second,
+                                 [this]() { repaint(); }),
+            "Split Note");
+
+        // Select the two new notes
+        selectedNoteIds.clear();
+        selectedNoteIds.insert (first.id);
+        selectedNoteIds.insert (second.id);
+        notifySelectionChanged();
+        break;
+    }
+}
+
+void PianoRollComponent::mergeSelectedNotes()
+{
+    if (selectedNoteIds.size() < 2)
+        return;
+
+    // Collect selected notes sorted by start time
+    std::vector<Note> selectedNotes;
+    for (const auto& note : notes)
+    {
+        if (selectedNoteIds.count (note.id))
+            selectedNotes.push_back (note);
+    }
+
+    std::sort (selectedNotes.begin(), selectedNotes.end(),
+        [] (const Note& a, const Note& b) { return a.startTime < b.startTime; });
+
+    // Check adjacency (within 50ms gap tolerance)
+    for (size_t i = 1; i < selectedNotes.size(); ++i)
+    {
+        double gap = selectedNotes[i].startTime - selectedNotes[i - 1].endTime();
+        if (gap > 0.05)
+            return;  // Notes are not adjacent
+    }
+
+    // Merge all selected into one note
+    // For simplicity, merge pairs from the end
+    // But the simple approach: merge all at once by creating one note spanning the full range
+    Note merged;
+    merged.id = nextNoteId++;
+    merged.startTime = selectedNotes.front().startTime;
+    double endTime = selectedNotes.back().endTime();
+    merged.duration = endTime - merged.startTime;
+    merged.confidence = 0.0f;
+
+    // Weighted average pitch
+    double totalWeight = 0.0;
+    double weightedPitch = 0.0;
+    for (const auto& n : selectedNotes)
+    {
+        weightedPitch += static_cast<double> (n.originalPitch) * n.duration;
+        totalWeight += n.duration;
+        merged.confidence += n.confidence * static_cast<float> (n.duration);
+    }
+    merged.originalPitch = totalWeight > 0.0 ? static_cast<float> (weightedPitch / totalWeight) : 0.0f;
+    merged.confidence = totalWeight > 0.0f ? merged.confidence / static_cast<float> (totalWeight) : 0.0f;
+    merged.midiNote = Note::frequencyToMidi (merged.originalPitch);
+
+    // For merge with 2 notes, use the dedicated MergeAction
+    if (selectedNotes.size() == 2)
+    {
+        undoManager.perform (
+            new NoteMergeAction (notes, selectedNotes[0], selectedNotes[1], merged,
+                                  [this]() { repaint(); }),
+            "Merge Notes");
+    }
+    else
+    {
+        // For 3+ notes, we do sequential pair merges isn't clean with undo.
+        // Simpler: manually remove all selected, add merged, with a custom undo
+        // For now, just merge the first two — user can merge iteratively
+        undoManager.perform (
+            new NoteMergeAction (notes, selectedNotes[0], selectedNotes[1], merged,
+                                  [this]() { repaint(); }),
+            "Merge Notes");
+    }
+
+    selectedNoteIds.clear();
+    selectedNoteIds.insert (merged.id);
+    notifySelectionChanged();
+}
+
+float PianoRollComponent::computeAveragePitch (double startT, double endT) const
+{
+    float sum = 0.0f;
+    int count = 0;
+    for (const auto& frame : pitchCurve)
+    {
+        if (frame.time >= startT && frame.time < endT
+            && frame.frequency > 0.0f && frame.confidence >= 0.3f)
+        {
+            sum += frame.frequency;
+            count++;
+        }
+    }
+    return count > 0 ? sum / static_cast<float> (count) : 0.0f;
 }
 
 void PianoRollComponent::addListener (Listener* listener)

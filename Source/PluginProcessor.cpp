@@ -88,7 +88,7 @@ void InKeyProcessor::startPlayback (const NoteList& editedNotes)
 
     // Use the active take's audio for rendering
     auto& take = takes[static_cast<size_t> (activeTakeIndex)];
-    auto rendered = audioEngine.render (take.audio, take.sampleRate, editedNotes);
+    auto rendered = audioEngine.render (take.audio, take.sampleRate, editedNotes, take.pitchCurve);
 
     audioEngine.startPlayback (rendered, take.sampleRate);
     currentState.store (PluginState::PLAYING);
@@ -214,12 +214,181 @@ bool InKeyProcessor::alignActiveTakeToReference()
     return true;
 }
 
-void InKeyProcessor::getStateInformation (juce::MemoryBlock& /*destData*/)
+void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    // Version 1 state format
+    juce::ValueTree state ("InKeyState");
+    state.setProperty ("version", 1, nullptr);
+    state.setProperty ("activeTakeIndex", activeTakeIndex, nullptr);
+    state.setProperty ("referenceTakeIndex", referenceTakeIndex, nullptr);
+    state.setProperty ("nextTakeId", nextTakeId, nullptr);
+
+    auto currentPluginState = currentState.load();
+    state.setProperty ("pluginState",
+        (currentPluginState == PluginState::EDITING || currentPluginState == PluginState::PLAYING)
+            ? static_cast<int> (PluginState::EDITING) : static_cast<int> (PluginState::IDLE),
+        nullptr);
+
+    // Serialize each take
+    for (size_t ti = 0; ti < takes.size(); ++ti)
+    {
+        const auto& take = takes[ti];
+        juce::ValueTree takeTree ("Take");
+        takeTree.setProperty ("id", take.id, nullptr);
+        takeTree.setProperty ("sampleRate", take.sampleRate, nullptr);
+        takeTree.setProperty ("duration", take.duration, nullptr);
+        takeTree.setProperty ("isReference", take.isReference, nullptr);
+        takeTree.setProperty ("isAligned", take.isAligned, nullptr);
+
+        // Audio data as Base64
+        if (take.audio.getNumSamples() > 0)
+        {
+            int numSamples = take.audio.getNumSamples();
+            takeTree.setProperty ("audioNumSamples", numSamples, nullptr);
+            juce::MemoryBlock audioBlock (static_cast<size_t> (numSamples) * sizeof (float));
+            std::memcpy (audioBlock.getData(), take.audio.getReadPointer (0),
+                          static_cast<size_t> (numSamples) * sizeof (float));
+            takeTree.setProperty ("audioData", audioBlock.toBase64Encoding(), nullptr);
+        }
+
+        // Pitch curve
+        juce::ValueTree pitchTree ("PitchCurve");
+        for (const auto& frame : take.pitchCurve)
+        {
+            juce::ValueTree frameTree ("Frame");
+            frameTree.setProperty ("time", frame.time, nullptr);
+            frameTree.setProperty ("freq", static_cast<double> (frame.frequency), nullptr);
+            frameTree.setProperty ("conf", static_cast<double> (frame.confidence), nullptr);
+            pitchTree.appendChild (frameTree, nullptr);
+        }
+        takeTree.appendChild (pitchTree, nullptr);
+
+        // Notes
+        juce::ValueTree notesTree ("Notes");
+        for (const auto& note : take.notes)
+        {
+            juce::ValueTree noteTree ("Note");
+            noteTree.setProperty ("id", note.id, nullptr);
+            noteTree.setProperty ("startTime", note.startTime, nullptr);
+            noteTree.setProperty ("duration", note.duration, nullptr);
+            noteTree.setProperty ("originalPitch", static_cast<double> (note.originalPitch), nullptr);
+            noteTree.setProperty ("midiNote", note.midiNote, nullptr);
+            noteTree.setProperty ("confidence", static_cast<double> (note.confidence), nullptr);
+            noteTree.setProperty ("pitchShift", static_cast<double> (note.pitchShiftSemitones), nullptr);
+            noteTree.setProperty ("formantShift", static_cast<double> (note.formantShiftSemitones), nullptr);
+            noteTree.setProperty ("timeOffset", note.timeOffset, nullptr);
+            noteTree.setProperty ("durationScale", note.durationScale, nullptr);
+            noteTree.setProperty ("gainDB", static_cast<double> (note.gainDB), nullptr);
+            noteTree.setProperty ("pitchDriftScale", static_cast<double> (note.pitchDriftScale), nullptr);
+            notesTree.appendChild (noteTree, nullptr);
+        }
+        takeTree.appendChild (notesTree, nullptr);
+
+        state.appendChild (takeTree, nullptr);
+    }
+
+    // Write the ValueTree to the memory block
+    juce::MemoryOutputStream stream (destData, false);
+    state.writeToStream (stream);
 }
 
-void InKeyProcessor::setStateInformation (const void* /*data*/, int /*sizeInBytes*/)
+void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
+    auto state = juce::ValueTree::readFromData (data, static_cast<size_t> (sizeInBytes));
+
+    if (! state.isValid() || state.getType().toString() != "InKeyState")
+        return;
+
+    int version = state.getProperty ("version", 0);
+    if (version < 1)
+        return;
+
+    takes.clear();
+    activeTakeIndex = state.getProperty ("activeTakeIndex", -1);
+    referenceTakeIndex = state.getProperty ("referenceTakeIndex", 0);
+    nextTakeId = state.getProperty ("nextTakeId", 1);
+
+    // Restore takes
+    for (int ti = 0; ti < state.getNumChildren(); ++ti)
+    {
+        auto takeTree = state.getChild (ti);
+        if (takeTree.getType().toString() != "Take")
+            continue;
+
+        Take take;
+        take.id = takeTree.getProperty ("id", 0);
+        take.sampleRate = takeTree.getProperty ("sampleRate", 44100.0);
+        take.duration = takeTree.getProperty ("duration", 0.0);
+        take.isReference = takeTree.getProperty ("isReference", false);
+        take.isAligned = takeTree.getProperty ("isAligned", false);
+
+        // Restore audio
+        int numSamples = takeTree.getProperty ("audioNumSamples", 0);
+        if (numSamples > 0)
+        {
+            juce::String base64 = takeTree.getProperty ("audioData", "");
+            if (base64.isNotEmpty())
+            {
+                juce::MemoryBlock audioBlock;
+                audioBlock.fromBase64Encoding (base64);
+
+                if (audioBlock.getSize() == static_cast<size_t> (numSamples) * sizeof (float))
+                {
+                    take.audio.setSize (1, numSamples);
+                    std::memcpy (take.audio.getWritePointer (0), audioBlock.getData(),
+                                  static_cast<size_t> (numSamples) * sizeof (float));
+                }
+            }
+        }
+
+        // Restore pitch curve
+        auto pitchTree = takeTree.getChildWithName ("PitchCurve");
+        if (pitchTree.isValid())
+        {
+            for (int fi = 0; fi < pitchTree.getNumChildren(); ++fi)
+            {
+                auto frameTree = pitchTree.getChild (fi);
+                PitchFrame frame;
+                frame.time = frameTree.getProperty ("time", 0.0);
+                frame.frequency = static_cast<float> ((double) frameTree.getProperty ("freq", 0.0));
+                frame.confidence = static_cast<float> ((double) frameTree.getProperty ("conf", 0.0));
+                take.pitchCurve.push_back (frame);
+            }
+        }
+
+        // Restore notes
+        auto notesTree = takeTree.getChildWithName ("Notes");
+        if (notesTree.isValid())
+        {
+            for (int ni = 0; ni < notesTree.getNumChildren(); ++ni)
+            {
+                auto noteTree = notesTree.getChild (ni);
+                Note note;
+                note.id = noteTree.getProperty ("id", 0);
+                note.startTime = noteTree.getProperty ("startTime", 0.0);
+                note.duration = noteTree.getProperty ("duration", 0.0);
+                note.originalPitch = static_cast<float> ((double) noteTree.getProperty ("originalPitch", 0.0));
+                note.midiNote = noteTree.getProperty ("midiNote", 0);
+                note.confidence = static_cast<float> ((double) noteTree.getProperty ("confidence", 0.0));
+                note.pitchShiftSemitones = static_cast<float> ((double) noteTree.getProperty ("pitchShift", 0.0));
+                note.formantShiftSemitones = static_cast<float> ((double) noteTree.getProperty ("formantShift", 0.0));
+                note.timeOffset = noteTree.getProperty ("timeOffset", 0.0);
+                note.durationScale = noteTree.getProperty ("durationScale", 1.0);
+                note.gainDB = static_cast<float> ((double) noteTree.getProperty ("gainDB", 0.0));
+                note.pitchDriftScale = static_cast<float> ((double) noteTree.getProperty ("pitchDriftScale", 1.0));
+                take.notes.push_back (note);
+            }
+        }
+
+        takes.push_back (std::move (take));
+    }
+
+    // Restore plugin state
+    int savedState = state.getProperty ("pluginState", static_cast<int> (PluginState::IDLE));
+    if (savedState == static_cast<int> (PluginState::EDITING) && ! takes.empty())
+        currentState.store (PluginState::EDITING);
+    else
+        currentState.store (PluginState::IDLE);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

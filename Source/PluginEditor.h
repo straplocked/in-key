@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "Editing/QuantizationEngine.h"
 #include "UI/InKeyLookAndFeel.h"
 #include "UI/WaveformComponent.h"
 #include "UI/PitchCurveComponent.h"
@@ -29,6 +30,7 @@ private:
 
     // PianoRollComponent::Listener
     void noteSelected (const Note* note) override;
+    void selectionChanged (const std::set<int>& selectedIds) override;
     void noteEdited (const Note& note) override;
 
     // Update properties panel from current selection
@@ -38,6 +40,9 @@ private:
     void updateTakeSelector();
     void switchToTake (int index);
     void performAlignment();
+
+    // Build current scale from selector state
+    ScaleDefinition getCurrentScale() const;
 
     InKeyLookAndFeel lookAndFeel;
     InKeyProcessor& processorRef;
@@ -50,6 +55,9 @@ private:
     juce::TextButton resetButton;
     juce::TextButton alignButton;
     juce::ComboBox takeSelector;
+    juce::ComboBox scaleRootSelector;
+    juce::ComboBox scaleTypeSelector;
+    juce::Slider quantizeStrengthSlider;
     juce::Label statusLabel;
 
     WaveformComponent waveformComponent;

@@ -14,7 +14,8 @@ AudioEngine::~AudioEngine()
 
 juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& originalAudio,
                                                 double sampleRate,
-                                                const NoteList& notes)
+                                                const NoteList& notes,
+                                                const PitchCurve& pitchCurve)
 {
     int totalSamples = originalAudio.getNumSamples();
     if (totalSamples == 0)
@@ -27,6 +28,9 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
     output.clear();
 
     float* outputData = output.getWritePointer (0);
+
+    // Crossfade length: 5ms
+    int crossfadeSamples = static_cast<int> (0.005 * sampleRate);
 
     for (const auto& note : notes)
     {
@@ -50,20 +54,40 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
         if (dstLength <= 0)
             continue;
 
-        bool needsProcessing = std::abs (note.pitchShiftSemitones) > 0.01f
-                            || std::abs (note.formantShiftSemitones) > 0.01f
-                            || std::abs (note.durationScale - 1.0) > 0.01;
+        bool needsPitchTimeProcessing = std::abs (note.pitchShiftSemitones) > 0.01f
+                                     || std::abs (note.formantShiftSemitones) > 0.01f
+                                     || std::abs (note.durationScale - 1.0) > 0.01;
 
-        if (! needsProcessing)
+        bool hasDrift = std::abs (note.pitchDriftScale - 1.0f) > 0.01f && ! pitchCurve.empty();
+
+        // Gain factor from dB
+        float gainFactor = std::pow (10.0f, note.gainDB / 20.0f);
+
+        // Render note audio into a temporary buffer, then mix with crossfade
+        juce::AudioBuffer<float> noteBuffer (1, dstLength);
+        noteBuffer.clear();
+        float* noteBuf = noteBuffer.getWritePointer (0);
+
+        if (hasDrift)
         {
-            // No edits — copy original audio directly
+            // Drift processing: sub-segment pitch correction
+            auto driftResult = processNoteWithDrift (originalData + srcStart, srcLength,
+                                                      sampleRate, note, pitchCurve);
+
+            const float* driftData = driftResult.getReadPointer (0);
+            int driftLen = juce::jmin (driftResult.getNumSamples(), dstLength);
+
+            for (int i = 0; i < driftLen; ++i)
+                noteBuf[i] = driftData[i] * gainFactor;
+        }
+        else if (! needsPitchTimeProcessing)
+        {
             int toCopy = juce::jmin (srcLength, dstLength);
             for (int i = 0; i < toCopy; ++i)
-                outputData[dstStart + i] += originalData[srcStart + i];
+                noteBuf[i] = originalData[srcStart + i] * gainFactor;
         }
         else
         {
-            // Process with Rubber Band
             auto processed = processNote (originalData + srcStart, srcLength,
                                            sampleRate, note.pitchShiftSemitones,
                                            note.formantShiftSemitones, note.durationScale);
@@ -72,8 +96,22 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
             int procLength = juce::jmin (processed.getNumSamples(), dstLength);
 
             for (int i = 0; i < procLength; ++i)
-                outputData[dstStart + i] += procData[i];
+                noteBuf[i] = procData[i] * gainFactor;
         }
+
+        // Apply raised-cosine fade-in/fade-out at note edges
+        int fadeLen = juce::jmin (crossfadeSamples, dstLength / 2);
+        for (int i = 0; i < fadeLen; ++i)
+        {
+            float fade = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                    * static_cast<float> (i) / static_cast<float> (fadeLen)));
+            noteBuf[i] *= fade;
+            noteBuf[dstLength - 1 - i] *= fade;
+        }
+
+        // Mix into output
+        for (int i = 0; i < dstLength; ++i)
+            outputData[dstStart + i] += noteBuf[i];
     }
 
     // Fill gaps between notes with original audio (unvoiced regions)
@@ -139,6 +177,130 @@ juce::AudioBuffer<float> AudioEngine::processNote (const float* input, int numSa
     juce::AudioBuffer<float> output (1, available);
     float* outputPtr = output.getWritePointer (0);
     stretcher.retrieve (&outputPtr, static_cast<size_t> (available));
+
+    return output;
+}
+
+juce::AudioBuffer<float> AudioEngine::processNoteWithDrift (const float* input, int numSamples,
+                                                              double sampleRate, const Note& note,
+                                                              const PitchCurve& pitchCurve)
+{
+    // Sub-segment processing for drift control.
+    // Split the note into ~50ms segments, compute per-segment pitch correction
+    // that flattens or exaggerates the original pitch variation.
+
+    int segmentSamples = static_cast<int> (0.05 * sampleRate); // 50ms segments
+    segmentSamples = juce::jmax (256, segmentSamples);
+
+    // Compute average pitch for this note from the pitch curve
+    float avgMidi = 0.0f;
+    int avgCount = 0;
+    auto frameIt = std::lower_bound (pitchCurve.begin(), pitchCurve.end(), note.startTime,
+        [] (const PitchFrame& f, double t) { return f.time < t; });
+
+    for (auto it = frameIt; it != pitchCurve.end() && it->time <= note.endTime(); ++it)
+    {
+        if (it->frequency > 0.0f && it->confidence >= 0.3f)
+        {
+            avgMidi += 69.0f + 12.0f * std::log2 (it->frequency / 440.0f);
+            avgCount++;
+        }
+    }
+
+    if (avgCount > 0)
+        avgMidi /= static_cast<float> (avgCount);
+    else
+        avgMidi = static_cast<float> (note.midiNote);
+
+    // Process each sub-segment with its own pitch correction
+    juce::AudioBuffer<float> output (1, numSamples * 2); // extra space for time stretching
+    output.clear();
+    int outputPos = 0;
+
+    int crossLen = juce::jmin (static_cast<int> (0.003 * sampleRate), segmentSamples / 4);
+
+    for (int segStart = 0; segStart < numSamples; segStart += segmentSamples)
+    {
+        int segLen = juce::jmin (segmentSamples, numSamples - segStart);
+        if (segLen < 64)
+            break;
+
+        // Find the average pitch of this segment from pitch curve
+        double segTimeStart = note.startTime + static_cast<double> (segStart) / sampleRate;
+        double segTimeEnd = segTimeStart + static_cast<double> (segLen) / sampleRate;
+
+        float segMidi = avgMidi;
+        int segCount = 0;
+        float segSum = 0.0f;
+
+        for (auto it = frameIt; it != pitchCurve.end() && it->time <= segTimeEnd; ++it)
+        {
+            if (it->time >= segTimeStart && it->frequency > 0.0f && it->confidence >= 0.3f)
+            {
+                segSum += 69.0f + 12.0f * std::log2 (it->frequency / 440.0f);
+                segCount++;
+            }
+        }
+        if (segCount > 0)
+            segMidi = segSum / static_cast<float> (segCount);
+
+        // Drift correction: at driftScale=0, flatten to average (correct all deviation)
+        // at driftScale=1, no change. at driftScale=2, double the deviation.
+        float deviation = segMidi - avgMidi;
+        float targetDeviation = deviation * note.pitchDriftScale;
+        float driftCorrection = targetDeviation - deviation;
+
+        // Total pitch shift for this segment
+        float totalPitchShift = note.pitchShiftSemitones + driftCorrection;
+
+        bool needsProcessing = std::abs (totalPitchShift) > 0.01f
+                            || std::abs (note.formantShiftSemitones) > 0.01f
+                            || std::abs (note.durationScale - 1.0) > 0.01;
+
+        if (! needsProcessing)
+        {
+            // Direct copy
+            int copyLen = juce::jmin (segLen, output.getNumSamples() - outputPos);
+            float* outPtr = output.getWritePointer (0);
+            for (int i = 0; i < copyLen; ++i)
+                outPtr[outputPos + i] = input[segStart + i];
+            outputPos += copyLen;
+        }
+        else
+        {
+            auto segResult = processNote (input + segStart, segLen, sampleRate,
+                                           totalPitchShift, note.formantShiftSemitones,
+                                           note.durationScale);
+
+            int resultLen = juce::jmin (segResult.getNumSamples(),
+                                         output.getNumSamples() - outputPos);
+            const float* segData = segResult.getReadPointer (0);
+            float* outPtr = output.getWritePointer (0);
+
+            // Apply short crossfade at segment boundary to avoid clicks
+            for (int i = 0; i < resultLen; ++i)
+            {
+                if (i < crossLen && outputPos > 0)
+                {
+                    float fade = static_cast<float> (i) / static_cast<float> (crossLen);
+                    outPtr[outputPos + i] = outPtr[outputPos + i] * (1.0f - fade) + segData[i] * fade;
+                }
+                else
+                {
+                    outPtr[outputPos + i] = segData[i];
+                }
+            }
+            outputPos += resultLen;
+        }
+    }
+
+    // Trim output to actual length
+    if (outputPos > 0 && outputPos < output.getNumSamples())
+    {
+        juce::AudioBuffer<float> trimmed (1, outputPos);
+        trimmed.copyFrom (0, 0, output, 0, 0, outputPos);
+        return trimmed;
+    }
 
     return output;
 }
