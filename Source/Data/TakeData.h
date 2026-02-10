@@ -14,6 +14,7 @@ struct Take
     double duration = 0.0;
     bool isReference = false;
     bool isAligned = false;
+    int64_t captureStartSampleInDAW = 0;  // DAW timeline position when capture began
 };
 
 using TakeList = std::vector<Take>;

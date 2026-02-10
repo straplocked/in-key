@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_events/juce_events.h>
 #include "PluginState.h"
 #include "Audio/AudioCapture.h"
 #include "Analysis/PitchAnalyzer.h"
@@ -72,6 +73,13 @@ public:
     // Legacy accessor (returns active take's notes)
     const NoteList& getSegmentedNotes() const;
 
+    // DAW transport sync: request background re-render after note edits
+    void requestRender();
+
+    // DAW transport state for UI playhead
+    std::atomic<double> dawPlayheadInCapture { -1.0 };
+    std::atomic<bool> dawIsPlaying { false };
+
 private:
     // PitchAnalyzer::Listener
     void analysisComplete() override;
@@ -91,6 +99,37 @@ private:
 
     // Fallback empty notes for legacy accessor
     NoteList emptyNotes;
+
+    // DAW transport sync
+    std::atomic<bool> captureJustStarted { false };
+    int64_t captureStartInSamples = 0;
+
+    // Background render
+    std::atomic<bool> renderNeeded { false };
+    std::atomic<bool> renderInProgress { false };
+    void performRender();
+
+    // Background render thread
+    class RenderThread : public juce::Thread
+    {
+    public:
+        RenderThread (InKeyProcessor& p) : Thread ("InKey Render"), processor (p) {}
+        void run() override;
+    private:
+        InKeyProcessor& processor;
+    };
+    std::unique_ptr<RenderThread> renderThread;
+
+    // Render debounce timer (fires on message thread)
+    class RenderDebounceTimer : public juce::Timer
+    {
+    public:
+        RenderDebounceTimer (InKeyProcessor& p) : processor (p) {}
+        void timerCallback() override;
+    private:
+        InKeyProcessor& processor;
+    };
+    RenderDebounceTimer renderDebounceTimer { *this };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (InKeyProcessor)
 };

@@ -77,6 +77,7 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
             pianoRollComponent.getUndoManager().undo();
             pianoRollComponent.repaint();
             updatePropertiesFromSelection();
+            notesChanged();
         }
     };
     addChildComponent (undoButton);
@@ -91,6 +92,7 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
             pianoRollComponent.getUndoManager().redo();
             pianoRollComponent.repaint();
             updatePropertiesFromSelection();
+            notesChanged();
         }
     };
     addChildComponent (redoButton);
@@ -105,6 +107,7 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
         pianoRollComponent.quantizePitchToScale (strength, scale);
         pianoRollComponent.repaint();
         updatePropertiesFromSelection();
+        // notesChanged already called by quantizePitchToScale via listener
     };
     addChildComponent (quantizeButton);
 
@@ -406,7 +409,16 @@ void InKeyEditor::timerCallback()
         alignButton.setVisible (showPianoRoll && multiTake
                                  && processorRef.getActiveTakeIndex() != processorRef.getReferenceTakeIndex());
 
-        pianoRollComponent.setPlayheadPosition (-1.0);
+        // Show playhead if DAW transport is playing through our region
+        if (processorRef.dawIsPlaying.load())
+        {
+            double playPos = processorRef.dawPlayheadInCapture.load();
+            pianoRollComponent.setPlayheadPosition (playPos);
+        }
+        else
+        {
+            pianoRollComponent.setPlayheadPosition (-1.0);
+        }
 
         auto numNotes = pianoRollComponent.getNotes().size();
         int takeNum = processorRef.getActiveTakeIndex() + 1;
@@ -552,6 +564,15 @@ void InKeyEditor::noteEdited (const Note& note)
     (void) note;
 }
 
+void InKeyEditor::notesChanged()
+{
+    // Save edited notes to active take and request background re-render
+    if (processorRef.getActiveTakeIndex() >= 0)
+        processorRef.saveActiveTakeNotes (pianoRollComponent.getNotes());
+
+    processorRef.requestRender();
+}
+
 void InKeyEditor::updatePropertiesFromSelection()
 {
     const auto& selectedIds = pianoRollComponent.getSelectedNoteIds();
@@ -616,6 +637,7 @@ void InKeyEditor::switchToTake (int index)
         pianoRollComponent.repaint();
         propertiesPanel.setSelectedNote (nullptr);
         updateTakeSelector();
+        processorRef.requestRender();
     }
 }
 
@@ -637,6 +659,7 @@ void InKeyEditor::performAlignment()
             pianoRollComponent.repaint();
         }
 
+        processorRef.requestRender();
         statusLabel.setText ("Alignment complete!", juce::dontSendNotification);
     }
     else

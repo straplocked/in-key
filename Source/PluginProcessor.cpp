@@ -9,10 +9,19 @@ InKeyProcessor::InKeyProcessor()
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
     pitchAnalyzer.addListener (this);
+    renderDebounceTimer.startTimer (200);
 }
 
 InKeyProcessor::~InKeyProcessor()
 {
+    renderDebounceTimer.stopTimer();
+
+    if (renderThread != nullptr)
+    {
+        renderThread->stopThread (2000);
+        renderThread.reset();
+    }
+
     pitchAnalyzer.removeListener (this);
 }
 
@@ -35,19 +44,73 @@ void InKeyProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
+    auto state = currentState.load();
+
     // Capture audio when in CAPTURING state
-    if (currentState.load() == PluginState::CAPTURING)
+    if (state == PluginState::CAPTURING)
     {
+        // Record DAW position on the first block of capture
+        if (captureJustStarted.exchange (false))
+        {
+            captureStartInSamples = 0;
+            if (auto* playHead = getPlayHead())
+            {
+                if (auto pos = playHead->getPosition())
+                {
+                    if (auto samples = pos->getTimeInSamples())
+                        captureStartInSamples = *samples;
+                }
+            }
+        }
+
         audioCapture.writeAudio (buffer, buffer.getNumSamples());
     }
-    // Play back rendered audio when in PLAYING state
-    else if (currentState.load() == PluginState::PLAYING)
+    // Manual playback (standalone / preview via Play button)
+    else if (state == PluginState::PLAYING)
     {
         buffer.clear();
         bool stillPlaying = audioEngine.fillBuffer (buffer, buffer.getNumSamples());
 
         if (! stillPlaying)
             currentState.store (PluginState::EDITING);
+    }
+    // DAW transport sync: output rendered audio when DAW plays
+    else if (state == PluginState::EDITING && audioEngine.hasRenderedAudio.load())
+    {
+        if (auto* playHead = getPlayHead())
+        {
+            if (auto pos = playHead->getPosition())
+            {
+                if (pos->getIsPlaying())
+                {
+                    if (auto timeInSamples = pos->getTimeInSamples())
+                    {
+                        int64_t dawPos = *timeInSamples;
+                        int activeTake = activeTakeIndex;
+
+                        if (activeTake >= 0 && activeTake < static_cast<int> (takes.size()))
+                        {
+                            int64_t captStart = takes[static_cast<size_t> (activeTake)].captureStartSampleInDAW;
+                            double sr = takes[static_cast<size_t> (activeTake)].sampleRate;
+
+                            buffer.clear();
+                            audioEngine.fillBufferAtPosition (buffer, buffer.getNumSamples(),
+                                                              dawPos, captStart);
+
+                            // Communicate playhead position to UI
+                            double posInCapture = static_cast<double> (dawPos - captStart) / sr;
+                            dawPlayheadInCapture.store (posInCapture);
+                            dawIsPlaying.store (true);
+                        }
+                    }
+                }
+                else
+                {
+                    dawIsPlaying.store (false);
+                    dawPlayheadInCapture.store (-1.0);
+                }
+            }
+        }
     }
 }
 
@@ -62,6 +125,7 @@ void InKeyProcessor::startCapture()
     if (state != PluginState::IDLE && state != PluginState::EDITING)
         return;
 
+    captureJustStarted.store (true);
     audioCapture.startCapture();
     currentState.store (PluginState::CAPTURING);
 }
@@ -117,6 +181,7 @@ void InKeyProcessor::analysisComplete()
     take.notes = std::move (notes);
     take.duration = audioCapture.getCapturedDurationSeconds();
     take.isReference = takes.empty(); // First take is reference
+    take.captureStartSampleInDAW = captureStartInSamples;
 
     takes.push_back (std::move (take));
     activeTakeIndex = static_cast<int> (takes.size()) - 1;
@@ -125,6 +190,9 @@ void InKeyProcessor::analysisComplete()
         referenceTakeIndex = 0;
 
     currentState.store (PluginState::EDITING);
+
+    // Auto-render so audio is ready for DAW playback
+    requestRender();
 }
 
 void InKeyProcessor::analysisProgress (float /*progress*/)
@@ -214,6 +282,55 @@ bool InKeyProcessor::alignActiveTakeToReference()
     return true;
 }
 
+void InKeyProcessor::requestRender()
+{
+    renderNeeded.store (true);
+}
+
+void InKeyProcessor::performRender()
+{
+    if (activeTakeIndex < 0 || activeTakeIndex >= static_cast<int> (takes.size()))
+        return;
+
+    auto& take = takes[static_cast<size_t> (activeTakeIndex)];
+
+    // Copy notes and pitch curve for thread safety
+    NoteList notesCopy = take.notes;
+    PitchCurve curveCopy = take.pitchCurve;
+
+    auto rendered = audioEngine.render (take.audio, take.sampleRate, notesCopy, curveCopy);
+    audioEngine.swapRenderedBuffer (std::move (rendered));
+}
+
+void InKeyProcessor::RenderThread::run()
+{
+    do
+    {
+        processor.renderInProgress.store (true);
+        processor.performRender();
+        processor.renderInProgress.store (false);
+    }
+    while (processor.renderNeeded.exchange (false) && ! threadShouldExit());
+}
+
+void InKeyProcessor::RenderDebounceTimer::timerCallback()
+{
+    if (processor.renderNeeded.load() && ! processor.renderInProgress.load())
+    {
+        processor.renderNeeded.store (false);
+
+        // Stop previous render thread if still around
+        if (processor.renderThread != nullptr)
+        {
+            processor.renderThread->stopThread (2000);
+            processor.renderThread.reset();
+        }
+
+        processor.renderThread = std::make_unique<RenderThread> (processor);
+        processor.renderThread->startThread();
+    }
+}
+
 void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     // Version 1 state format
@@ -239,6 +356,7 @@ void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
         takeTree.setProperty ("duration", take.duration, nullptr);
         takeTree.setProperty ("isReference", take.isReference, nullptr);
         takeTree.setProperty ("isAligned", take.isAligned, nullptr);
+        takeTree.setProperty ("captureStartSample", static_cast<juce::int64> (take.captureStartSampleInDAW), nullptr);
 
         // Audio data as Base64
         if (take.audio.getNumSamples() > 0)
@@ -321,6 +439,7 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
         take.duration = takeTree.getProperty ("duration", 0.0);
         take.isReference = takeTree.getProperty ("isReference", false);
         take.isAligned = takeTree.getProperty ("isAligned", false);
+        take.captureStartSampleInDAW = static_cast<int64_t> ((juce::int64) takeTree.getProperty ("captureStartSample", 0));
 
         // Restore audio
         int numSamples = takeTree.getProperty ("audioNumSamples", 0);
@@ -386,9 +505,14 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
     // Restore plugin state
     int savedState = state.getProperty ("pluginState", static_cast<int> (PluginState::IDLE));
     if (savedState == static_cast<int> (PluginState::EDITING) && ! takes.empty())
+    {
         currentState.store (PluginState::EDITING);
+        requestRender();  // Pre-render so DAW playback works immediately
+    }
     else
+    {
         currentState.store (PluginState::IDLE);
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

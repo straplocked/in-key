@@ -30,6 +30,18 @@ public:
 
     double getPlaybackPosition() const;
 
+    // DAW-synced playback: read from rendered buffer at a specific DAW position
+    bool fillBufferAtPosition (juce::AudioBuffer<float>& outputBuffer, int numSamples,
+                               int64_t dawPositionInSamples, int64_t captureStartSample);
+
+    // Double-buffered rendered audio for DAW transport sync
+    juce::AudioBuffer<float> renderedBuffers[2];
+    std::atomic<int> activeBufferIndex { 0 };
+    std::atomic<bool> hasRenderedAudio { false };
+
+    // Store a new rendered buffer (called from background render thread)
+    void swapRenderedBuffer (juce::AudioBuffer<float>&& newBuffer);
+
 private:
     // Process a note segment: pitch shift, time stretch, and/or formant shift.
     // Returns processed audio buffer.

@@ -146,6 +146,7 @@ void PianoRollComponent::editNoteProperty (int noteId, float pitchShift, float f
                 "Edit Note");
 
             listeners.call ([&note] (Listener& l) { l.noteEdited (note); });
+            listeners.call ([] (Listener& l) { l.notesChanged(); });
             return;
         }
     }
@@ -197,6 +198,7 @@ void PianoRollComponent::quantizePitchToScale (float strength, const ScaleDefini
             new BatchNoteEditAction (notes, beforeStates, afterStates,
                                       [this]() { repaint(); }),
             "Quantize Pitch");
+        listeners.call ([] (Listener& l) { l.notesChanged(); });
     }
 }
 
@@ -230,6 +232,7 @@ void PianoRollComponent::resetAllEdits()
         new BatchNoteEditAction (notes, beforeStates, afterStates,
                                   [this]() { repaint(); }),
         "Reset All Edits");
+    listeners.call ([] (Listener& l) { l.notesChanged(); });
 }
 
 // --- Selection ---
@@ -568,6 +571,9 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent& /*event*/)
                 }
             }
         }
+
+        // Notify that notes have changed (triggers re-render for DAW sync)
+        listeners.call ([] (Listener& l) { l.notesChanged(); });
     }
 
     dragMode = DragMode::None;
@@ -736,8 +742,12 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& event)
 void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& event,
                                           const juce::MouseWheelDetails& wheel)
 {
-    if (event.mods.isCommandDown())
+    bool cmdDown = event.mods.isCommandDown();
+    bool shiftDown = event.mods.isShiftDown();
+
+    if (cmdDown && shiftDown)
     {
+        // Cmd+Shift+scroll: zoom pitch (vertical zoom)
         int midiRange = viewTopMidi - viewBottomMidi;
         int delta = wheel.deltaY > 0 ? -2 : 2;
         int newRange = juce::jlimit (12, 96, midiRange + delta);
@@ -746,8 +756,9 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& event,
         viewBottomMidi = juce::jmax (0, center - newRange / 2);
         viewTopMidi = juce::jmin (127, viewBottomMidi + newRange);
     }
-    else
+    else if (cmdDown)
     {
+        // Cmd+scroll: zoom time (horizontal zoom at cursor)
         auto gridArea = getGridArea();
         double zoomFactor = wheel.deltaY > 0 ? 0.85 : 1.18;
         double newDuration = juce::jlimit (0.5, juce::jmax (1.0, totalDuration * 1.5),
@@ -763,7 +774,59 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& event,
 
         viewDuration = newDuration;
     }
+    else
+    {
+        // No modifier: scroll/pan
+        // deltaX → pan time (trackpad horizontal swipe)
+        // deltaY → pan pitch (vertical scroll)
+        // Shift+deltaY → pan time (mouse wheel shortcut for horizontal scroll)
 
+        float scrollSpeed = 6.0f;
+
+        if (shiftDown || std::abs (wheel.deltaX) > std::abs (wheel.deltaY))
+        {
+            // Horizontal scroll (time)
+            float dx = shiftDown ? wheel.deltaY : wheel.deltaX;
+            double timeDelta = -static_cast<double> (dx) * scrollSpeed * viewDuration / 10.0;
+            viewStartTime = juce::jmax (0.0, viewStartTime + timeDelta);
+        }
+        else
+        {
+            // Vertical scroll (pitch)
+            int midiRange = viewTopMidi - viewBottomMidi;
+            int midiDelta = static_cast<int> (wheel.deltaY * scrollSpeed);
+            viewBottomMidi = juce::jlimit (0, 127 - midiRange, viewBottomMidi + midiDelta);
+            viewTopMidi = viewBottomMidi + midiRange;
+        }
+
+        // Also handle trackpad diagonal scrolling (both axes simultaneously)
+        if (! shiftDown && std::abs (wheel.deltaX) > 0.001f && std::abs (wheel.deltaY) > 0.001f)
+        {
+            double timeDelta = -static_cast<double> (wheel.deltaX) * scrollSpeed * viewDuration / 10.0;
+            viewStartTime = juce::jmax (0.0, viewStartTime + timeDelta);
+        }
+    }
+
+    repaint();
+}
+
+void PianoRollComponent::mouseMagnify (const juce::MouseEvent& event, float scaleFactor)
+{
+    // Pinch-to-zoom: zoom time axis at cursor position
+    auto gridArea = getGridArea();
+    double zoomFactor = 1.0 / static_cast<double> (scaleFactor);
+    double newDuration = juce::jlimit (0.5, juce::jmax (1.0, totalDuration * 1.5),
+                                        viewDuration * zoomFactor);
+
+    if (gridArea.getWidth() > 0)
+    {
+        double mouseTime = xToTime (event.position.x);
+        double mouseRatio = (event.position.x - gridArea.getX()) / gridArea.getWidth();
+        viewStartTime = mouseTime - mouseRatio * newDuration;
+        viewStartTime = juce::jmax (0.0, viewStartTime);
+    }
+
+    viewDuration = newDuration;
     repaint();
 }
 
@@ -776,6 +839,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
         {
             undoManager.undo();
             repaint();
+            listeners.call ([] (Listener& l) { l.notesChanged(); });
             return true;
         }
     }
@@ -787,6 +851,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
         {
             undoManager.redo();
             repaint();
+            listeners.call ([] (Listener& l) { l.notesChanged(); });
             return true;
         }
     }
@@ -833,6 +898,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
                                               [this]() { repaint(); }),
                     "Reset Selected");
                 repaint();
+                listeners.call ([] (Listener& l) { l.notesChanged(); });
                 return true;
             }
         }
@@ -1466,6 +1532,7 @@ void PianoRollComponent::splitNoteAtTime (int noteId, double splitTime)
         selectedNoteIds.insert (first.id);
         selectedNoteIds.insert (second.id);
         notifySelectionChanged();
+        listeners.call ([] (Listener& l) { l.notesChanged(); });
         break;
     }
 }
@@ -1539,6 +1606,7 @@ void PianoRollComponent::mergeSelectedNotes()
     selectedNoteIds.clear();
     selectedNoteIds.insert (merged.id);
     notifySelectionChanged();
+    listeners.call ([] (Listener& l) { l.notesChanged(); });
 }
 
 float PianoRollComponent::computeAveragePitch (double startT, double endT) const

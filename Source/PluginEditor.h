@@ -32,6 +32,7 @@ private:
     void noteSelected (const Note* note) override;
     void selectionChanged (const std::set<int>& selectedIds) override;
     void noteEdited (const Note& note) override;
+    void notesChanged() override;
 
     // Update properties panel from current selection
     void updatePropertiesFromSelection();

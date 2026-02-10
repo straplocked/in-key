@@ -355,3 +355,48 @@ double AudioEngine::getPlaybackPosition() const
         return 0.0;
     return static_cast<double> (playbackPosition.load()) / playbackSampleRate;
 }
+
+bool AudioEngine::fillBufferAtPosition (juce::AudioBuffer<float>& outputBuffer, int numSamples,
+                                         int64_t dawPositionInSamples, int64_t captureStartSample)
+{
+    if (! hasRenderedAudio.load())
+        return false;
+
+    int bufIdx = activeBufferIndex.load();
+    const auto& rendered = renderedBuffers[bufIdx];
+
+    if (rendered.getNumSamples() == 0)
+        return false;
+
+    int64_t offsetInCapture = dawPositionInSamples - captureStartSample;
+
+    // If DAW position is entirely outside our capture region, output silence
+    if (offsetInCapture >= rendered.getNumSamples() || offsetInCapture + numSamples <= 0)
+        return false;
+
+    const float* src = rendered.getReadPointer (0);
+
+    for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
+    {
+        float* dst = outputBuffer.getWritePointer (ch);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            int64_t readPos = offsetInCapture + i;
+            if (readPos >= 0 && readPos < rendered.getNumSamples())
+                dst[i] = src[readPos];
+            // else: already cleared to 0
+        }
+    }
+
+    return true;
+}
+
+void AudioEngine::swapRenderedBuffer (juce::AudioBuffer<float>&& newBuffer)
+{
+    // Write to the inactive buffer slot, then flip the index
+    int inactiveIndex = 1 - activeBufferIndex.load();
+    renderedBuffers[inactiveIndex] = std::move (newBuffer);
+    activeBufferIndex.store (inactiveIndex);
+    hasRenderedAudio.store (true);
+}

@@ -57,6 +57,7 @@ public:
     void mouseMove (const juce::MouseEvent& event) override;
     void mouseWheelMove (const juce::MouseEvent& event,
                          const juce::MouseWheelDetails& wheel) override;
+    void mouseMagnify (const juce::MouseEvent& event, float scaleFactor) override;
     void mouseDrag (const juce::MouseEvent& event) override;
     bool keyPressed (const juce::KeyPress& key) override;
 
@@ -78,6 +79,7 @@ public:
         virtual void noteSelected (const Note* note) = 0;
         virtual void selectionChanged (const std::set<int>& selectedIds) = 0;
         virtual void noteEdited (const Note& note) = 0;
+        virtual void notesChanged() {}  // Called when notes are modified and need re-render
     };
 
     void addListener (Listener* listener);
