@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 InKey contributors
+// This file is part of InKey. See LICENSE for details.
+
 #include "QuantizationEngine.h"
 
 float QuantizationEngine::calculateCorrection (float originalPitchHz, float strength,

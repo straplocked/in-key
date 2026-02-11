@@ -1,0 +1,27 @@
+name: Build & Test
+
+on: [push, pull_request]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        run: git clone --depth 1 --branch 7.0.12 https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
+
+      - name: Clone Rubber Band
+        run: git clone --depth 1 https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Build Tests
+        run: cmake --build build --target InKeyTests
+
+      - name: Run Tests
+        run: ./build/Tests/InKeyTests

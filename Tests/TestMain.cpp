@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 InKey contributors
+// This file is part of InKey. See LICENSE for details.
+
 #include <catch2/catch_session.hpp>
 #include <juce_events/juce_events.h>
 

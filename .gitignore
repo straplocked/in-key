@@ -24,7 +24,6 @@ Builds/
 # ThirdParty libraries (cloned separately)
 ThirdParty/JUCE/
 ThirdParty/rubberband/
-ThirdParty/essentia/
 
 # Compiled objects
 *.o

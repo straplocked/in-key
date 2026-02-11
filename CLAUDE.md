@@ -4,29 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Summary
 
-InKey is a Melodyne-style VST3/AU plugin for graphical vocal pitch correction and multi-take alignment. It uses **offline processing** (capture → analyze → edit), not real-time. The project is GPL-3.0 open source, targeting macOS and Windows.
+InKey is a Melodyne-style VST3 plugin for graphical vocal pitch correction and multi-take alignment. It uses **offline processing** (capture → analyze → edit), not real-time. The project is GPL-3.0 open source, targeting macOS and Windows.
 
-**Status:** Pre-development. No source code exists yet. Check `Docs/ROADMAP.md` for current phase and next steps.
+**Status:** Feature-complete. All 8 development phases plus Melodyne parity batches (A-G) are implemented. See `Docs/ROADMAP.md` for details.
 
 ## Build Commands
 
-Once Phase 1 is complete, the build system will be CMake + JUCE:
-
 ```bash
-# macOS
-cmake -B build -G Xcode
+# Clone dependencies (if not already present)
+git clone --depth 1 --branch 7.0.12 \
+  https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
+git clone --depth 1 \
+  https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
+
+# Build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 
-# Windows
-cmake -B build -G "Visual Studio 17 2022"
-cmake --build build --config Release
-```
-
-ThirdParty dependencies must be cloned manually (not committed to repo):
-```bash
-git clone https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
-git clone https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
-git clone https://github.com/MTG/essentia.git ThirdParty/essentia
+# Run tests
+cmake --build build --target InKeyTests
+./build/Tests/InKeyTests
 ```
 
 ## Architecture
@@ -40,34 +37,34 @@ git clone https://github.com/MTG/essentia.git ThirdParty/essentia
 
 **Four processing pipelines:**
 1. **Capture:** DAW → lock-free FIFO → AudioBuffer storage
-2. **Analysis:** AudioBuffer → Essentia pYIN pitch detection → onset detection → note segmentation → AnalyzedAudio
-3. **Playback:** AnalyzedAudio + user edits → per-note Rubber Band pitch/time shift → cached output → DAW
-4. **Alignment:** MFCC features → DTW cost matrix → time-warp curve → Rubber Band time-stretch
+2. **Analysis:** AudioBuffer → standalone YIN pitch detection → note segmentation → NoteData
+3. **Playback:** Notes + user edits → per-note Rubber Band pitch/time shift → cached output → DAW
+4. **Alignment:** MFCC features (standalone, JUCE FFT) → DTW cost matrix → time-warp curve → Rubber Band time-stretch
 
 **Key data flow:** Edits are per-note. Original analysis data is immutable. Processed audio is cached per-note and only re-rendered when that note's parameters change.
 
 ## Tech Stack
 
-- **JUCE 7.x** (GPL): Plugin wrapper, GUI, DSP utilities, threading primitives
+- **JUCE 7.0.12** (GPL): Plugin wrapper, GUI, DSP utilities, threading primitives
 - **Rubber Band v3.3.0** (GPL): Pitch shifting, time stretching, formant preservation (offline mode with `study()` then `process()`)
-- **Essentia v2.1_beta6** (AGPL): pYIN pitch detection, onset detection, MFCC extraction. Fallback: standalone YIN/pYIN if Essentia CMake integration is too complex
+- **Standalone YIN**: Pitch detection (implemented in `Source/Analysis/PitchDetector.h/cpp`)
+- **Standalone MFCC**: Feature extraction using JUCE FFT (implemented in `Source/Alignment/MFCCExtractor.h/cpp`)
 - **C++17**, CMake 3.22+
 
-## Code Organization (Planned)
+## Code Organization
 
-Source code goes in `Source/` with these subdirectories:
+Source code is in `Source/` with these subdirectories:
 - `Audio/` — Capture and buffer management
-- `Analysis/` — Pitch detection, onset detection, note segmentation
-- `DSP/` — AudioEngine, RubberBandWrapper, FormantShifter
-- `Data/` — Note, AnalyzedAudio, EditState, MultiTakeSession
-- `Alignment/` — DTWAligner, MFCC FeatureExtractor
-- `Editing/` — QuantizationEngine, EditHistory (undo/redo)
-- `UI/` — PianoRollComponent, WaveformComponent, PitchCurveComponent, PropertiesPanel
-- `Utilities/` — Math helpers, pitch/time conversion
+- `Analysis/` — YIN pitch detection, note segmentation, sibilant detection, vibrato analysis, key detection
+- `DSP/` — AudioEngine with Rubber Band integration
+- `Data/` — NoteData, TakeData, PitchData, MidiExporter
+- `Alignment/` — DTWAligner, MFCCExtractor
+- `Editing/` — EditActions (undo/redo), QuantizationEngine
+- `UI/` — PianoRollComponent, WaveformComponent, PitchCurveComponent, PropertiesPanel, DetectionSettingsDialog, InKeyLookAndFeel
 
 ## Important Constraints
 
-- The user is new to C++ and audio DSP. Prefer using library APIs (JUCE, Rubber Band, Essentia) over writing DSP from scratch.
+- The user is new to C++ and audio DSP. Prefer using library APIs (JUCE, Rubber Band) over writing DSP from scratch.
 - Audio thread safety is critical: never allocate, lock, or do I/O in `processBlock()`.
 - Plugin state must serialize/deserialize via `juce::ValueTree` for DAW project saves.
 - Plugin identifiers: manufacturer code `Inky`, plugin code `Vedt`, bundle ID `com.inkey.vocaleditor`.
@@ -76,4 +73,4 @@ Source code goes in `Source/` with these subdirectories:
 
 - `Docs/ARCHITECTURE.md` — System design, data structures, threading model, UI component hierarchy
 - `Docs/ROADMAP.md` — 8-phase implementation plan with task checklists and completion criteria
-- `Docs/TECH_STACK.md` — Library APIs, algorithm parameters, CMake integration snippets, fallback plans
+- `Docs/TECH_STACK.md` — Library APIs, algorithm parameters, integration details

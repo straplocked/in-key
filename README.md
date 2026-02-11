@@ -1,136 +1,149 @@
-# InKey - Open Source Vocal Pitch Editor
+# InKey — Open Source Vocal Pitch Editor
 
-A Melodyne-style VST3/AU plugin for graphical pitch correction and multi-take vocal alignment.
+A Melodyne-style VST3 plugin for graphical vocal pitch correction and multi-take alignment, built with JUCE and Rubber Band.
 
-## Status: Pre-Development
+**Status: Feature-complete.** All 8 development phases plus Melodyne parity features (Batches A-G) are implemented.
 
-This project is in the planning phase. No code has been written yet. See [Docs/ROADMAP.md](Docs/ROADMAP.md) for the implementation plan and current progress.
+## Screenshot
 
-## What Is This?
+> Screenshot coming soon.
 
-InKey is an audio plugin that lets you:
+## Features
 
-- **Visualize vocal pitch** on a piano roll with detailed pitch curves
-- **Edit pitch graphically** by dragging notes to correct intonation
-- **Adjust timing** of individual notes to tighten performances
-- **Shift formants** to maintain natural vocal character when changing pitch
-- **Align multiple vocal takes** to a reference take for tighter stacks/harmonies
-
-The plugin operates in **offline mode** — it captures audio from your DAW, analyzes it completely, then provides a graphical editor for making corrections. This is similar to how Melodyne works.
-
-## Tech Stack
-
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Framework | [JUCE 7.x](https://github.com/juce-framework/JUCE) | Plugin wrapper, GUI, DSP utilities |
-| Pitch Detection | [Essentia](https://essentia.upf.edu/) (pYIN) | Analyze vocal pitch from audio |
-| Pitch/Time Shifting | [Rubber Band Library](https://breakfastquay.com/rubberband/) | High-quality pitch and time manipulation |
-| Build System | [CMake](https://cmake.org/) | Cross-platform builds |
-
-## Plugin Formats
-
-- **VST3** — Windows, macOS (most DAWs)
-- **AU (Audio Units)** — macOS (Logic Pro, GarageBand)
-- **Standalone** — For development and testing
-
-## Supported Platforms
-
-- macOS 11+ (Intel and Apple Silicon)
-- Windows 10+
-
-## Prerequisites
-
-Before you can build this project, you need:
-
-### macOS
-- **Xcode 14+** (free from App Store)
-- **CMake 3.22+** (`brew install cmake`)
-- **Git** (`xcode-select --install` if not already installed)
-
-### Windows
-- **Visual Studio 2019+** (Community edition is free)
-- **CMake 3.22+** (download from cmake.org)
-- **Git** (download from git-scm.com)
+- **YIN pitch detection** with configurable sensitivity, confidence thresholds, and note segmentation
+- **Interactive piano roll** with drag-to-edit for pitch, timing, and duration
+- **Formant preservation** via Rubber Band — shift pitch without chipmunk artifacts
+- **Scale-aware quantization** with 8 built-in scales, custom scale builder, and adjustable strength
+- **Multi-take alignment** using MFCC feature extraction and Dynamic Time Warping (DTW)
+- **Sibilant detection** and per-note sibilant balance control
+- **Vibrato editing** — analyze, flatten, or exaggerate vibrato per note
+- **Pitch drift control** — scale intra-note pitch variation from flat to exaggerated
+- **Smart tool** — context-sensitive editing based on where you click within a note
+- **Split and merge** notes with full undo support
+- **Per-note volume**, fade in/out, and auto-leveling
+- **Time quantization** to BPM grid with selectable subdivisions
+- **Multi-select** with lasso, Shift/Cmd+click, and batch editing
+- **Fine pitch editing** — hold Shift for cent-level precision
+- **Numeric pitch input** — type note names (C4, Bb3) or relative shifts (+2st)
+- **Master tuning** reference (A4 = 415-465 Hz)
+- **Full undo/redo** for all edit operations
+- **Keyboard shortcuts** — Space (play/stop), R (capture), Q (quantize), T (time quantize), F (zoom-to-fit)
+- **DAW transport sync** — playhead follows DAW position, captures align to DAW timeline
+- **State persistence** — all takes, edits, and audio survive DAW project save/reload
+- **Resizable window** (700x500 to 1800x1200)
 
 ## Getting Started
 
+### Prerequisites
+
+- **CMake 3.22+**
+- **C++17 compiler**
+- **Git**
+- macOS: Xcode Command Line Tools (`xcode-select --install`) or full Xcode
+- Windows: Visual Studio 2019+ (Community edition is free)
+
+### Build
+
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/straplocked/in-key.git
 cd in-key
 
-# Clone JUCE into ThirdParty
-git clone https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
+# Clone dependencies into ThirdParty/
+git clone --depth 1 --branch 7.0.12 \
+  https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
+git clone --depth 1 \
+  https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
 
-# Clone Rubber Band
-git clone https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
-
-# Clone Essentia
-git clone https://github.com/MTG/essentia.git ThirdParty/essentia
-
-# Build (macOS)
-cmake -B build -G Xcode
-cmake --build build --config Release
-
-# Build (Windows)
-cmake -B build -G "Visual Studio 17 2022"
+# Build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-> **Note:** Build instructions will be refined once Phase 1 is complete and the CMake configuration is finalized.
+The VST3 plugin is automatically installed to your system's plugin directory after building.
+
+### Run Tests
+
+```bash
+cmake --build build --target InKeyTests
+./build/Tests/InKeyTests
+```
+
+114 tests across 10 test suites.
+
+## Tech Stack
+
+| Component | Technology | License |
+|-----------|-----------|---------|
+| Framework | [JUCE 7.0.12](https://github.com/juce-framework/JUCE) | GPL-3.0 |
+| Pitch/Time Shifting | [Rubber Band Library](https://breakfastquay.com/rubberband/) | GPL-2.0 |
+| Pitch Detection | Standalone YIN implementation | — |
+| MFCC Extraction | Standalone (JUCE FFT) | — |
+| DTW Alignment | Standalone (Sakoe-Chiba band) | — |
+| Testing | [Catch2](https://github.com/catchorg/Catch2) | BSL-1.0 |
 
 ## Project Structure
 
 ```
 in-key/
-├── CMakeLists.txt              # Build configuration
-├── README.md                   # This file
-├── LICENSE                     # GPL-3.0
-├── .gitignore
+├── CMakeLists.txt
+├── README.md
+├── LICENSE                        # GPL-3.0
+├── CONTRIBUTING.md
+├── CLAUDE.md                      # AI assistant instructions
 │
 ├── Docs/
-│   ├── ARCHITECTURE.md         # System design, data flow, technical decisions
-│   ├── ROADMAP.md              # Implementation plan, phases, and progress tracking
-│   └── TECH_STACK.md           # Libraries, algorithms, and integration details
+│   ├── ARCHITECTURE.md            # System design and data flow
+│   ├── ROADMAP.md                 # Development phases and progress
+│   └── TECH_STACK.md              # Libraries and algorithms
 │
 ├── Source/
-│   ├── PluginProcessor.h/cpp   # Main audio processor
-│   ├── PluginEditor.h/cpp      # Main editor window
-│   ├── PluginParameters.h      # Parameter definitions
-│   ├── Audio/                  # Audio capture and buffering
-│   ├── Analysis/               # Pitch detection and segmentation
-│   ├── DSP/                    # Audio engine and pitch/time shifting
-│   ├── Data/                   # Data structures (Note, AnalyzedAudio)
-│   ├── Alignment/              # Multi-take vocal alignment (DTW)
-│   ├── Editing/                # Edit operations, undo/redo
-│   ├── UI/                     # All visual components
-│   └── Utilities/              # Math, conversion, logging helpers
+│   ├── PluginProcessor.h/cpp      # Audio processor (state machine, DAW sync)
+│   ├── PluginEditor.h/cpp         # Editor window (toolbar, layout)
+│   ├── PluginState.h              # State enum
+│   ├── Audio/                     # Audio capture (lock-free FIFO)
+│   ├── Analysis/                  # YIN pitch detection, note segmentation,
+│   │                              #   sibilant detection, vibrato analysis
+│   ├── DSP/                       # Audio engine (Rubber Band rendering)
+│   ├── Data/                      # Note, Take, PitchData, MIDI export
+│   ├── Alignment/                 # MFCC extraction, DTW alignment
+│   ├── Editing/                   # Undo/redo actions, quantization engine
+│   └── UI/                        # Piano roll, properties panel,
+│                                  #   waveform, pitch curve, look-and-feel
 │
-├── ThirdParty/                 # External libraries
-│   ├── JUCE/
-│   ├── rubberband/
-│   └── essentia/
+├── Tests/                         # Catch2 unit tests (114 tests)
 │
-└── Tests/                      # Unit tests
+└── ThirdParty/                    # External libraries (not committed)
+    ├── JUCE/
+    └── rubberband/
 ```
 
-## License
+## Architecture
 
-GPL-3.0 — See [LICENSE](LICENSE) for details.
+InKey operates as an **offline processor**: capture audio from the DAW, analyze it, then edit graphically.
 
-This license is compatible with JUCE (GPL), Rubber Band (GPL), and Essentia (AGPL).
+**State machine:** `IDLE → CAPTURING → ANALYZING → EDITING ↔ PLAYING`
 
-## Learning Resources
+**Threading model:**
+- **Audio thread** — Lock-free only (`processBlock`). Uses `juce::AbstractFifo` for capture.
+- **Message thread** — GUI updates and user interaction.
+- **Background thread** — Pitch analysis, audio rendering (double-buffered).
 
-If you're new to audio plugin development (like we are), these resources are helpful:
-
-- **JUCE:** [Official free course](https://juce.com) (launched Jan 2026)
-- **JUCE Tutorials:** [Create a basic Audio/MIDI plugin](https://juce.com/tutorials/tutorial_create_projucer_basic_plugin/)
-- **YouTube:** [The Audio Programmer](https://www.youtube.com/@TheAudioProgrammer)
-- **Book:** "Designing Audio Effect Plugins in C++" by Will Pirkle
-- **DSP Fundamentals:** [The Scientist and Engineer's Guide to DSP](http://www.dspguide.com/) (free online)
-- **Community:** [JUCE Forum](https://forum.juce.com), [r/AudioProgramming](https://reddit.com/r/AudioProgramming)
+See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the full system design.
 
 ## Contributing
 
-This is an open source project. Contributions are welcome once the foundation is in place (Phase 1-2 complete). See [Docs/ROADMAP.md](Docs/ROADMAP.md) for what's being worked on.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+GPL-3.0 — See [LICENSE](LICENSE) for the full text.
+
+**Dependencies:** JUCE (GPL-3.0), Rubber Band (GPL-2.0), Inter font (SIL OFL 1.1)
+
+## Acknowledgments
+
+- [JUCE](https://juce.com) — Cross-platform audio application framework
+- [Rubber Band Library](https://breakfastquay.com/rubberband/) — High-quality pitch and time shifting
+- de Cheveigné & Kawahara (2002) — *"YIN, a fundamental frequency estimator for speech and music"*
+- [Catch2](https://github.com/catchorg/Catch2) — C++ testing framework

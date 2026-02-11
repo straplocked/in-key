@@ -72,25 +72,21 @@ After capture, the audio is analyzed completely before editing begins. This runs
 ```
 Captured AudioBuffer
     │
-    ├──► PitchAnalyzer (Essentia/pYIN)
+    ├──► PitchAnalyzer (standalone YIN)
     │    • Frame size: 2048 samples
     │    • Hop size: 256 samples
     │    • Output: vector<PitchFrame> (time, frequency, confidence)
     │    • Vocal range: 80 Hz – 800 Hz
     │
-    ├──► OnsetDetector (Essentia)
-    │    • Detects note boundaries (consonants, breaths, phrase starts)
-    │    • Uses spectral flux method
-    │
     ├──► NoteSegmenter
-    │    • Combines pitch data + onset data
     │    • Segments continuous pitch curve into discrete Notes
+    │    • Uses pitch continuity, confidence thresholds, gap detection
     │    • Calculates: start time, duration, average pitch, MIDI note
     │    • Handles unvoiced regions (silence, consonants)
     │
-    └──► FeatureExtractor (Essentia)
-         • Extracts formant frequencies per note (for formant shifting)
+    └──► MFCCExtractor (standalone, JUCE FFT)
          • Extracts MFCC features (for vocal alignment / DTW)
+         • 13 coefficients, 26 Mel filterbank channels
          • Stores in AnalyzedAudio data model
 
     → State transitions to EDITING
@@ -128,13 +124,13 @@ For multi-take vocal alignment, a reference take is compared against target take
 ```
 Reference Take (AnalyzedAudio)
     │
-    ├──► FeatureExtractor: Extract MFCC features (13 coefficients per frame)
+    ├──► MFCCExtractor: Extract MFCC features (13 coefficients per frame)
     │
     ▼
 DTWAligner
     │
     ├──► For each Target Take:
-    │    ├── Extract MFCC features
+    │    ├── Extract MFCC features (standalone, JUCE FFT)
     │    ├── Compute DTW cost matrix (reference vs target)
     │    ├── Backtrack for optimal alignment path
     │    ├── Generate time-warp curve
@@ -371,14 +367,6 @@ PluginEditor (root, ~800x600 default)
 | User experience | Melodyne-like — full visual editor | Auto-Tune-like — immediate correction |
 
 We chose offline because it produces better results with simpler code, and the graphical editor requires complete audio analysis anyway.
-
-### Why Essentia Over Custom YIN?
-
-- Essentia provides a complete, tested pYIN implementation
-- Also provides onset detection, MFCC extraction, and formant analysis
-- Active maintenance and community
-- Saves months of DSP implementation and debugging
-- We can always replace individual algorithms later if needed
 
 ### Why Rubber Band Over Custom PSOLA?
 

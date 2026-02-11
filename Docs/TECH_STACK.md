@@ -119,61 +119,35 @@ target_link_libraries(VocalEditor PRIVATE rubberband)
 
 ---
 
-### Essentia
+### Standalone YIN Pitch Detection
 
-**What:** Open-source C++ library for audio analysis and music information retrieval.
+**What:** Fundamental frequency estimator for speech and music, implemented directly in InKey.
 
-**Website:** https://essentia.upf.edu/
-**Repository:** https://github.com/MTG/essentia
-**License:** AGPL-3.0 (compatible with GPL-3.0 for our use)
-**Current version:** v2.1_beta6
+**Files:** `Source/Analysis/PitchDetector.h/cpp`
 
-**We use it for:**
-- **Pitch detection:** `PitchYinProbabilistic` (pYIN algorithm)
-- **Onset detection:** `OnsetDetection` (spectral flux method)
-- **MFCC extraction:** `MFCC` (13 coefficients for vocal alignment)
-- **Formant analysis:** LPC-based formant extraction
+**Implementation:**
+- Full YIN algorithm: difference function, cumulative mean normalized difference, absolute threshold, parabolic interpolation
+- Frame size: 2048 samples, Hop size: 256 samples
+- Vocal range: 80 Hz - 800 Hz
+- Confidence threshold: configurable (default 0.3)
+- No external dependencies — uses only standard C++ and JUCE audio buffers
 
-**Key algorithms we use:**
+**Reference:** de Cheveigné & Kawahara (2002), *"YIN, a fundamental frequency estimator for speech and music"*
 
-1. **PitchYinProbabilistic (pYIN)**
-   - Probabilistic enhancement of YIN pitch detection
-   - Outputs pitch + confidence per frame
-   - Best available algorithm for singing voice
-   - Frame size: 2048, Hop: 256, Range: 80-800 Hz
+---
 
-2. **OnsetDetection**
-   - Spectral flux method
-   - Detects sharp changes in spectral energy
-   - Used to find note boundaries
+### Standalone MFCC Extraction
 
-3. **MFCC**
-   - 13 Mel-Frequency Cepstral Coefficients per frame
-   - Captures timbral characteristics of voice
-   - Used as features for DTW alignment
+**What:** Mel-Frequency Cepstral Coefficient extraction for vocal alignment features, implemented using JUCE FFT.
 
-**Integration notes:**
-- Essentia has many dependencies (FFTW, libsamplerate, etc.)
-- If CMake integration proves too complex, fall back to:
-  - Standalone pYIN: https://github.com/xstreck1/LibPyin
-  - Standalone YIN: https://github.com/ashokfernandez/Yin-Pitch-Tracking
-  - Manual MFCC implementation using JUCE's FFT
+**Files:** `Source/Alignment/MFCCExtractor.h/cpp`
 
-**CMake integration:**
-```cmake
-FetchContent_Declare(
-    essentia
-    GIT_REPOSITORY https://github.com/MTG/essentia.git
-    GIT_TAG v2.1_beta6
-)
-FetchContent_MakeAvailable(essentia)
-target_link_libraries(VocalEditor PRIVATE essentia)
-```
-
-**Fallback plan:** If Essentia is too hard to integrate, implement:
-1. YIN pitch detection manually (~200 lines of C++)
-2. Spectral flux onset detection using JUCE FFT (~100 lines)
-3. MFCC using JUCE FFT + mel filterbank (~300 lines)
+**Implementation:**
+- Hamming window, pre-emphasis filter
+- 26 Mel filterbank channels
+- DCT-II for 13 MFCC coefficients per frame
+- Frame size: 2048, Hop size: 1024
+- Uses `juce::dsp::FFT` — no external dependencies
 
 ---
 
