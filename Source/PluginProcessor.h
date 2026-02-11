@@ -48,6 +48,13 @@ public:
     void startPlayback (const NoteList& editedNotes);
     void stopPlayback();
 
+    // Preview playback for note audition (renders single note, plays it)
+    void startPreviewPlayback (const juce::AudioBuffer<float>& audio, double sampleRate);
+
+    // A/B comparison: bypass edits to hear original audio
+    bool getBypassEdits() const { return bypassEdits.load(); }
+    void setBypassEdits (bool bypass) { bypassEdits.store (bypass); }
+
     AudioCapture& getAudioCapture() { return audioCapture; }
     PitchAnalyzer& getPitchAnalyzer() { return pitchAnalyzer; }
     AudioEngine& getAudioEngine() { return audioEngine; }
@@ -99,6 +106,9 @@ private:
 
     // Fallback empty notes for legacy accessor
     NoteList emptyNotes;
+
+    // A/B bypass
+    std::atomic<bool> bypassEdits { false };
 
     // DAW transport sync
     std::atomic<bool> captureJustStarted { false };

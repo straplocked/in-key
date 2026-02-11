@@ -16,6 +16,41 @@ public:
         double durationScale = 1.0;
         float gainDB = 0.0f;
         float pitchDriftScale = 1.0f;
+        bool isMuted = false;
+        float transitionInDuration = 0.0f;
+        float transitionInShape = 0.0f;
+        PitchEnvelope pitchEnvelope;
+
+        // Centralized helpers to avoid field-by-field copies everywhere
+        static EditState fromNote (const Note& note)
+        {
+            EditState s;
+            s.pitchShiftSemitones = note.pitchShiftSemitones;
+            s.formantShiftSemitones = note.formantShiftSemitones;
+            s.timeOffset = note.timeOffset;
+            s.durationScale = note.durationScale;
+            s.gainDB = note.gainDB;
+            s.pitchDriftScale = note.pitchDriftScale;
+            s.isMuted = note.isMuted;
+            s.transitionInDuration = note.transitionInDuration;
+            s.transitionInShape = note.transitionInShape;
+            s.pitchEnvelope = note.pitchEnvelope;
+            return s;
+        }
+
+        void applyToNote (Note& note) const
+        {
+            note.pitchShiftSemitones = pitchShiftSemitones;
+            note.formantShiftSemitones = formantShiftSemitones;
+            note.timeOffset = timeOffset;
+            note.durationScale = durationScale;
+            note.gainDB = gainDB;
+            note.pitchDriftScale = pitchDriftScale;
+            note.isMuted = isMuted;
+            note.transitionInDuration = transitionInDuration;
+            note.transitionInShape = transitionInShape;
+            note.pitchEnvelope = pitchEnvelope;
+        }
     };
 
     NoteEditAction (NoteList& noteList,
@@ -24,7 +59,7 @@ public:
                     EditState after,
                     std::function<void()> onChange)
         : notes (noteList), id (noteId),
-          oldState (before), newState (after),
+          oldState (std::move (before)), newState (std::move (after)),
           onChangeCallback (std::move (onChange))
     {
     }
@@ -50,12 +85,7 @@ private:
         {
             if (note.id == id)
             {
-                note.pitchShiftSemitones = state.pitchShiftSemitones;
-                note.formantShiftSemitones = state.formantShiftSemitones;
-                note.timeOffset = state.timeOffset;
-                note.durationScale = state.durationScale;
-                note.gainDB = state.gainDB;
-                note.pitchDriftScale = state.pitchDriftScale;
+                state.applyToNote (note);
                 break;
             }
         }
@@ -115,12 +145,7 @@ private:
             {
                 if (note.id == snap.id)
                 {
-                    note.pitchShiftSemitones = snap.state.pitchShiftSemitones;
-                    note.formantShiftSemitones = snap.state.formantShiftSemitones;
-                    note.timeOffset = snap.state.timeOffset;
-                    note.durationScale = snap.state.durationScale;
-                    note.gainDB = snap.state.gainDB;
-                    note.pitchDriftScale = snap.state.pitchDriftScale;
+                    snap.state.applyToNote (note);
                     break;
                 }
             }
@@ -266,5 +291,50 @@ private:
     Note firstOriginal;
     Note secondOriginal;
     Note mergedNote;
+    std::function<void()> onChangeCallback;
+};
+
+// Action for deleting notes from the timeline
+class NoteDeleteAction : public juce::UndoableAction
+{
+public:
+    NoteDeleteAction (NoteList& noteList,
+                      std::vector<Note> deletedNotes,
+                      std::function<void()> onChange)
+        : notes (noteList),
+          removed (std::move (deletedNotes)),
+          onChangeCallback (std::move (onChange))
+    {
+    }
+
+    bool perform() override
+    {
+        for (const auto& r : removed)
+            notes.erase (std::remove_if (notes.begin(), notes.end(),
+                [&r] (const Note& n) { return n.id == r.id; }), notes.end());
+
+        if (onChangeCallback)
+            onChangeCallback();
+        return true;
+    }
+
+    bool undo() override
+    {
+        for (const auto& r : removed)
+            notes.push_back (r);
+
+        std::sort (notes.begin(), notes.end(),
+            [] (const Note& a, const Note& b) { return a.startTime < b.startTime; });
+
+        if (onChangeCallback)
+            onChangeCallback();
+        return true;
+    }
+
+    int getSizeInUnits() override { return static_cast<int> (removed.size()); }
+
+private:
+    NoteList& notes;
+    std::vector<Note> removed;
     std::function<void()> onChangeCallback;
 };

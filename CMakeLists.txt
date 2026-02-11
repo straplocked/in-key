@@ -67,6 +67,8 @@ target_sources(InKey PRIVATE
     Source/Alignment/DTWAligner.cpp
     Source/Editing/QuantizationEngine.cpp
     Source/UI/InKeyLookAndFeel.cpp
+    Source/Analysis/KeyDetector.cpp
+    Source/Data/MidiExporter.cpp
 )
 
 target_compile_definitions(InKey PUBLIC

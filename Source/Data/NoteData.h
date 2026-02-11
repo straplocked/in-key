@@ -3,6 +3,15 @@
 #include <vector>
 #include <cmath>
 
+// Pitch envelope control point for per-note pitch curve editing
+struct PitchControlPoint
+{
+    double timeNormalized = 0.0;       // 0.0 = note start, 1.0 = note end
+    float pitchOffsetSemitones = 0.0f; // Offset from the note's base pitch
+};
+
+using PitchEnvelope = std::vector<PitchControlPoint>;
+
 struct Note
 {
     int id = 0;
@@ -21,6 +30,10 @@ struct Note
     double durationScale = 1.0;
     float gainDB = 0.0f;          // Volume adjustment in dB (-24 to +12)
     float pitchDriftScale = 1.0f;  // Vibrato/drift control (0=flat, 1=original, 2=exaggerated)
+    bool isMuted = false;          // Mute toggle — skipped during render
+    float transitionInDuration = 0.0f;  // Pitch glide-in duration in seconds (0 = instant)
+    float transitionInShape = 0.0f;     // Glide shape: -1 concave, 0 linear, +1 convex
+    PitchEnvelope pitchEnvelope;        // Per-note pitch curve control points (empty = use original)
 
     // Check if note has any edits
     bool isEdited() const
@@ -30,7 +43,10 @@ struct Note
             || std::abs (timeOffset) > 0.001
             || std::abs (durationScale - 1.0) > 0.001
             || std::abs (gainDB) > 0.01f
-            || std::abs (pitchDriftScale - 1.0f) > 0.01f;
+            || std::abs (pitchDriftScale - 1.0f) > 0.01f
+            || isMuted
+            || transitionInDuration > 0.001f
+            || ! pitchEnvelope.empty();
     }
 
     // Reset all edits to defaults
@@ -42,6 +58,10 @@ struct Note
         durationScale = 1.0;
         gainDB = 0.0f;
         pitchDriftScale = 1.0f;
+        isMuted = false;
+        transitionInDuration = 0.0f;
+        transitionInShape = 0.0f;
+        pitchEnvelope.clear();
     }
 
     // Computed helpers

@@ -40,6 +40,15 @@ public:
     void splitNoteAtTime (int noteId, double splitTimeSeconds);
     void mergeSelectedNotes();
 
+    // Delete selected notes from timeline
+    void deleteSelectedNotes();
+
+    // Toggle mute on selected notes
+    void toggleMuteSelected();
+
+    // Paste clipboard properties to selected notes
+    void pastePropertiesToSelected();
+
     // Reset all edits on all notes
     void resetAllEdits();
 
@@ -59,6 +68,7 @@ public:
                          const juce::MouseWheelDetails& wheel) override;
     void mouseMagnify (const juce::MouseEvent& event, float scaleFactor) override;
     void mouseDrag (const juce::MouseEvent& event) override;
+    void mouseDoubleClick (const juce::MouseEvent& event) override;
     bool keyPressed (const juce::KeyPress& key) override;
 
     // Set playback position for playhead drawing (in seconds)
@@ -80,6 +90,7 @@ public:
         virtual void selectionChanged (const std::set<int>& selectedIds) = 0;
         virtual void noteEdited (const Note& note) = 0;
         virtual void notesChanged() {}  // Called when notes are modified and need re-render
+        virtual void noteAuditionRequested (const Note& note) { juce::ignoreUnused (note); }
     };
 
     void addListener (Listener* listener);
@@ -112,7 +123,7 @@ private:
     int panStartBottomMidi = 0;
 
     // Drag modes
-    enum class DragMode { None, MoveNote, ResizeLeft, ResizeRight };
+    enum class DragMode { None, MoveNote, ResizeLeft, ResizeRight, MoveBoundary, DragControlPoint, DragTransition };
     DragMode dragMode = DragMode::None;
     int dragNoteId = -1;
     float dragStartX = 0.0f;
@@ -124,6 +135,22 @@ private:
     NoteEditAction::EditState dragBeforeState {};
     // Multi-note drag state
     std::map<int, NoteEditAction::EditState> multiDragBeforeStates;
+
+    // Note boundary drag state
+    int boundaryNoteAId = -1;
+    int boundaryNoteBId = -1;
+    NoteEditAction::EditState boundaryBeforeStateA {};
+    NoteEditAction::EditState boundaryBeforeStateB {};
+
+    // Pitch control point drag state
+    int dragControlPointNoteId = -1;
+    int dragControlPointIndex = -1;
+    PitchEnvelope dragBeforeEnvelope;
+
+    // Transition drag state
+    int dragTransitionNoteId = -1;
+    float dragOriginalTransitionDuration = 0.0f;
+    float dragOriginalTransitionShape = 0.0f;
 
     // Edge detection threshold in pixels
     static constexpr float edgeThreshold = 6.0f;
@@ -140,6 +167,17 @@ private:
     // Playhead
     double playheadTime = -1.0;
 
+    // Clipboard for copy/paste
+    struct ClipboardProperties
+    {
+        float pitchShiftSemitones = 0.0f;
+        float formantShiftSemitones = 0.0f;
+        float gainDB = 0.0f;
+        float pitchDriftScale = 1.0f;
+        bool hasData = false;
+    };
+    ClipboardProperties clipboard;
+
     // Coordinate conversion
     float timeToX (double time) const;
     double xToTime (float x) const;
@@ -154,6 +192,7 @@ private:
     void drawNotes (juce::Graphics& g);
     void drawNotePitchCurve (juce::Graphics& g, const Note& note, const juce::Rectangle<float>& rect);
     void drawPitchCurve (juce::Graphics& g);
+    void drawTransitions (juce::Graphics& g);
     void drawLasso (juce::Graphics& g);
     void drawPlayhead (juce::Graphics& g);
 
@@ -163,6 +202,13 @@ private:
 
     // Check which edge of a note the point is near
     DragMode edgeAtPoint (const Note& note, juce::Point<float> point) const;
+
+    // Check if point is near a boundary between adjacent notes
+    struct BoundaryHit { int noteAId = -1; int noteBId = -1; };
+    BoundaryHit boundaryAtPoint (juce::Point<float> point) const;
+
+    // Check if point hits a pitch control point
+    int controlPointAtPoint (const Note& note, juce::Point<float> point) const;
 
     // Get note display rect (using edited positions)
     juce::Rectangle<float> getNoteRect (const Note& note) const;
@@ -177,6 +223,10 @@ private:
 
     // Helper for split: compute average pitch from pitch curve in a time range
     float computeAveragePitch (double startTime, double endTime) const;
+
+    // Find note by ID
+    Note* findNoteById (int noteId);
+    const Note* findNoteById (int noteId) const;
 
     // Layout
     static constexpr float pianoKeyWidth = 50.0f;

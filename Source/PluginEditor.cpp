@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include "Analysis/KeyDetector.h"
+#include "Data/MidiExporter.h"
 
 InKeyEditor::InKeyEditor (InKeyProcessor& p)
     : AudioProcessorEditor (&p),
@@ -157,6 +159,54 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     };
     addChildComponent (resetButton);
 
+    // A/B toggle button
+    abToggleButton.setButtonText ("A/B");
+    abToggleButton.setClickingTogglesState (true);
+    abToggleButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff555566));
+    abToggleButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffcc8844));
+    abToggleButton.onClick = [this]()
+    {
+        processorRef.setBypassEdits (abToggleButton.getToggleState());
+    };
+    addChildComponent (abToggleButton);
+
+    // Detect Key button
+    detectKeyButton.setButtonText ("Detect");
+    detectKeyButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff446688));
+    detectKeyButton.onClick = [this]()
+    {
+        auto result = KeyDetector::detect (pianoRollComponent.getNotes());
+        scaleRootSelector.setSelectedId (result.rootNote + 1, juce::sendNotification);
+        scaleTypeSelector.setSelectedId (result.scaleTypeIndex + 1, juce::sendNotification);
+    };
+    addChildComponent (detectKeyButton);
+
+    // MIDI Export button
+    exportMidiButton.setButtonText ("MIDI");
+    exportMidiButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff448866));
+    exportMidiButton.onClick = [this]()
+    {
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Export MIDI", juce::File::getSpecialLocation (juce::File::userDesktopDirectory),
+            "*.mid");
+
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode
+                               | juce::FileBrowserComponent::canSelectFiles,
+            [this, chooser] (const juce::FileChooser& fc)
+            {
+                auto result = fc.getResult();
+                if (result != juce::File())
+                {
+                    auto file = result.withFileExtension ("mid");
+                    bool ok = MidiExporter::exportToFile (file, pianoRollComponent.getNotes());
+                    statusLabel.setText (ok ? "MIDI exported: " + file.getFileName()
+                                            : "MIDI export failed",
+                                          juce::dontSendNotification);
+                }
+            });
+    };
+    addChildComponent (exportMidiButton);
+
     // Status label
     statusLabel.setColour (juce::Label::textColourId, InKeyColours::textSecondary);
     statusLabel.setFont (juce::Font (13.0f));
@@ -242,7 +292,10 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     redoButton.setTooltip ("Redo last edit (Cmd+Shift+Z)");
     quantizeButton.setTooltip ("Snap notes to scale (Q)");
     resetButton.setTooltip ("Reset all edits to original");
+    abToggleButton.setTooltip ("Toggle A/B comparison (B)");
     alignButton.setTooltip ("Align active take to reference using DTW");
+    detectKeyButton.setTooltip ("Auto-detect musical key");
+    exportMidiButton.setTooltip ("Export notes as MIDI file");
     scaleRootSelector.setTooltip ("Scale root note");
     scaleTypeSelector.setTooltip ("Scale type");
     quantizeStrengthSlider.setTooltip ("Quantize strength (0-100%)");
@@ -324,6 +377,8 @@ void InKeyEditor::resized()
     redoButton.setBounds (topBar.removeFromLeft (70).reduced (10, 10));
     quantizeButton.setBounds (topBar.removeFromLeft (90).reduced (10, 10));
     resetButton.setBounds (topBar.removeFromLeft (80).reduced (10, 10));
+    abToggleButton.setBounds (topBar.removeFromLeft (55).reduced (10, 10));
+    exportMidiButton.setBounds (topBar.removeFromLeft (60).reduced (10, 10));
 
     statusLabel.setBounds (topBar.reduced (10, 0));
 
@@ -334,6 +389,8 @@ void InKeyEditor::resized()
     scaleTypeSelector.setBounds (scaleBar.removeFromLeft (120).reduced (4, 4));
     scaleBar.removeFromLeft (8);
     quantizeStrengthSlider.setBounds (scaleBar.removeFromLeft (150).reduced (4, 4));
+    scaleBar.removeFromLeft (4);
+    detectKeyButton.setBounds (scaleBar.removeFromLeft (65).reduced (4, 4));
 
     // Properties panel at bottom
     static constexpr int propertiesHeight = 44;
@@ -365,6 +422,9 @@ void InKeyEditor::timerCallback()
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
+        abToggleButton.setVisible (false);
+        detectKeyButton.setVisible (false);
+        exportMidiButton.setVisible (false);
         propertiesPanel.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
@@ -398,6 +458,9 @@ void InKeyEditor::timerCallback()
         redoButton.setVisible (showPianoRoll);
         quantizeButton.setVisible (showPianoRoll);
         resetButton.setVisible (showPianoRoll);
+        abToggleButton.setVisible (showPianoRoll);
+        detectKeyButton.setVisible (showPianoRoll);
+        exportMidiButton.setVisible (showPianoRoll);
         propertiesPanel.setVisible (showPianoRoll);
         scaleRootSelector.setVisible (showPianoRoll);
         scaleTypeSelector.setVisible (showPianoRoll);
@@ -485,6 +548,9 @@ void InKeyEditor::timerCallback()
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
+        abToggleButton.setVisible (false);
+        detectKeyButton.setVisible (false);
+        exportMidiButton.setVisible (false);
         alignButton.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
@@ -508,6 +574,9 @@ void InKeyEditor::timerCallback()
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
         resetButton.setVisible (false);
+        abToggleButton.setVisible (false);
+        detectKeyButton.setVisible (false);
+        exportMidiButton.setVisible (false);
         propertiesPanel.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
@@ -562,6 +631,43 @@ void InKeyEditor::noteEdited (const Note& note)
 {
     updatePropertiesFromSelection();
     (void) note;
+}
+
+void InKeyEditor::noteAuditionRequested (const Note& note)
+{
+    // Skip audition if DAW is playing or not in editing state
+    if (processorRef.dawIsPlaying.load() || processorRef.getState() != PluginState::EDITING)
+        return;
+
+    int activeTake = processorRef.getActiveTakeIndex();
+    if (activeTake < 0 || activeTake >= processorRef.getNumTakes())
+        return;
+
+    auto& take = processorRef.getTakes()[static_cast<size_t> (activeTake)];
+
+    // Render just this one note
+    NoteList singleNote;
+    singleNote.push_back (note);
+
+    auto rendered = processorRef.getAudioEngine().render (take.audio, take.sampleRate,
+                                                           singleNote, take.pitchCurve);
+
+    if (rendered.getNumSamples() > 0)
+    {
+        // Trim to just the note's region
+        int startSample = static_cast<int> (note.editedStartTime() * take.sampleRate);
+        int endSample = static_cast<int> ((note.editedStartTime() + note.editedDuration()) * take.sampleRate);
+        startSample = juce::jlimit (0, rendered.getNumSamples(), startSample);
+        endSample = juce::jlimit (startSample, rendered.getNumSamples(), endSample);
+        int length = endSample - startSample;
+
+        if (length > 0)
+        {
+            juce::AudioBuffer<float> trimmed (1, length);
+            trimmed.copyFrom (0, 0, rendered, 0, startSample, length);
+            processorRef.startPreviewPlayback (trimmed, take.sampleRate);
+        }
+    }
 }
 
 void InKeyEditor::notesChanged()
@@ -735,6 +841,13 @@ bool InKeyEditor::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('f') && showPianoRoll)
     {
         pianoRollComponent.zoomToFit();
+        return true;
+    }
+
+    // B = Toggle A/B comparison
+    if (key == juce::KeyPress ('b') && showPianoRoll && state == PluginState::EDITING)
+    {
+        abToggleButton.setToggleState (! abToggleButton.getToggleState(), juce::sendNotification);
         return true;
     }
 

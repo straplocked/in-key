@@ -33,6 +33,7 @@ private:
     void selectionChanged (const std::set<int>& selectedIds) override;
     void noteEdited (const Note& note) override;
     void notesChanged() override;
+    void noteAuditionRequested (const Note& note) override;
 
     // Update properties panel from current selection
     void updatePropertiesFromSelection();
@@ -55,6 +56,9 @@ private:
     juce::TextButton quantizeButton;
     juce::TextButton resetButton;
     juce::TextButton alignButton;
+    juce::TextButton abToggleButton;
+    juce::TextButton detectKeyButton;
+    juce::TextButton exportMidiButton;
     juce::ComboBox takeSelector;
     juce::ComboBox scaleRootSelector;
     juce::ComboBox scaleTypeSelector;

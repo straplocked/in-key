@@ -75,7 +75,7 @@ void InKeyProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
             currentState.store (PluginState::EDITING);
     }
     // DAW transport sync: output rendered audio when DAW plays
-    else if (state == PluginState::EDITING && audioEngine.hasRenderedAudio.load())
+    else if (state == PluginState::EDITING)
     {
         if (auto* playHead = getPlayHead())
         {
@@ -90,12 +90,30 @@ void InKeyProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 
                         if (activeTake >= 0 && activeTake < static_cast<int> (takes.size()))
                         {
-                            int64_t captStart = takes[static_cast<size_t> (activeTake)].captureStartSampleInDAW;
-                            double sr = takes[static_cast<size_t> (activeTake)].sampleRate;
+                            auto& take = takes[static_cast<size_t> (activeTake)];
+                            int64_t captStart = take.captureStartSampleInDAW;
+                            double sr = take.sampleRate;
 
                             buffer.clear();
-                            audioEngine.fillBufferAtPosition (buffer, buffer.getNumSamples(),
-                                                              dawPos, captStart);
+
+                            if (bypassEdits.load())
+                            {
+                                // A/B mode: play original unedited audio
+                                int64_t offsetInCapture = dawPos - captStart;
+                                if (offsetInCapture >= 0 && offsetInCapture < take.audio.getNumSamples())
+                                {
+                                    int available = juce::jmin (buffer.getNumSamples(),
+                                        take.audio.getNumSamples() - static_cast<int> (offsetInCapture));
+                                    const float* src = take.audio.getReadPointer (0, static_cast<int> (offsetInCapture));
+                                    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                                        buffer.copyFrom (ch, 0, src, available);
+                                }
+                            }
+                            else if (audioEngine.hasRenderedAudio.load())
+                            {
+                                audioEngine.fillBufferAtPosition (buffer, buffer.getNumSamples(),
+                                                                  dawPos, captStart);
+                            }
 
                             // Communicate playhead position to UI
                             double posInCapture = static_cast<double> (dawPos - captStart) / sr;
@@ -150,11 +168,19 @@ void InKeyProcessor::startPlayback (const NoteList& editedNotes)
     if (activeTakeIndex < 0 || activeTakeIndex >= static_cast<int> (takes.size()))
         return;
 
-    // Use the active take's audio for rendering
     auto& take = takes[static_cast<size_t> (activeTakeIndex)];
-    auto rendered = audioEngine.render (take.audio, take.sampleRate, editedNotes, take.pitchCurve);
 
-    audioEngine.startPlayback (rendered, take.sampleRate);
+    if (bypassEdits.load())
+    {
+        // A/B mode: play original unedited audio
+        audioEngine.startPlayback (take.audio, take.sampleRate);
+    }
+    else
+    {
+        auto rendered = audioEngine.render (take.audio, take.sampleRate, editedNotes, take.pitchCurve);
+        audioEngine.startPlayback (rendered, take.sampleRate);
+    }
+
     currentState.store (PluginState::PLAYING);
 }
 
@@ -165,6 +191,16 @@ void InKeyProcessor::stopPlayback()
 
     audioEngine.stopPlayback();
     currentState.store (PluginState::EDITING);
+}
+
+void InKeyProcessor::startPreviewPlayback (const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    auto state = currentState.load();
+    if (state != PluginState::EDITING)
+        return;
+
+    audioEngine.startPlayback (audio, sampleRate);
+    currentState.store (PluginState::PLAYING);
 }
 
 void InKeyProcessor::analysisComplete()
@@ -398,6 +434,24 @@ void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
             noteTree.setProperty ("durationScale", note.durationScale, nullptr);
             noteTree.setProperty ("gainDB", static_cast<double> (note.gainDB), nullptr);
             noteTree.setProperty ("pitchDriftScale", static_cast<double> (note.pitchDriftScale), nullptr);
+            noteTree.setProperty ("isMuted", note.isMuted, nullptr);
+            noteTree.setProperty ("transitionInDuration", static_cast<double> (note.transitionInDuration), nullptr);
+            noteTree.setProperty ("transitionInShape", static_cast<double> (note.transitionInShape), nullptr);
+
+            // Serialize pitch envelope control points
+            if (! note.pitchEnvelope.empty())
+            {
+                juce::ValueTree envTree ("PitchEnvelope");
+                for (const auto& cp : note.pitchEnvelope)
+                {
+                    juce::ValueTree cpTree ("ControlPoint");
+                    cpTree.setProperty ("time", cp.timeNormalized, nullptr);
+                    cpTree.setProperty ("pitch", static_cast<double> (cp.pitchOffsetSemitones), nullptr);
+                    envTree.appendChild (cpTree, nullptr);
+                }
+                noteTree.appendChild (envTree, nullptr);
+            }
+
             notesTree.appendChild (noteTree, nullptr);
         }
         takeTree.appendChild (notesTree, nullptr);
@@ -495,6 +549,24 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
                 note.durationScale = noteTree.getProperty ("durationScale", 1.0);
                 note.gainDB = static_cast<float> ((double) noteTree.getProperty ("gainDB", 0.0));
                 note.pitchDriftScale = static_cast<float> ((double) noteTree.getProperty ("pitchDriftScale", 1.0));
+                note.isMuted = noteTree.getProperty ("isMuted", false);
+                note.transitionInDuration = static_cast<float> ((double) noteTree.getProperty ("transitionInDuration", 0.0));
+                note.transitionInShape = static_cast<float> ((double) noteTree.getProperty ("transitionInShape", 0.0));
+
+                // Restore pitch envelope
+                auto envTree = noteTree.getChildWithName ("PitchEnvelope");
+                if (envTree.isValid())
+                {
+                    for (int ci = 0; ci < envTree.getNumChildren(); ++ci)
+                    {
+                        auto cpTree = envTree.getChild (ci);
+                        PitchControlPoint cp;
+                        cp.timeNormalized = cpTree.getProperty ("time", 0.0);
+                        cp.pitchOffsetSemitones = static_cast<float> ((double) cpTree.getProperty ("pitch", 0.0));
+                        note.pitchEnvelope.push_back (cp);
+                    }
+                }
+
                 take.notes.push_back (note);
             }
         }

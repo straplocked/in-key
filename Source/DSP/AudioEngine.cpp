@@ -34,6 +34,10 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
 
     for (const auto& note : notes)
     {
+        // Skip muted notes
+        if (note.isMuted)
+            continue;
+
         // Source audio comes from original positions
         int srcStart = static_cast<int> (note.startTime * sampleRate);
         int srcEnd = static_cast<int> (note.endTime() * sampleRate);
@@ -59,6 +63,7 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
                                      || std::abs (note.durationScale - 1.0) > 0.01;
 
         bool hasDrift = std::abs (note.pitchDriftScale - 1.0f) > 0.01f && ! pitchCurve.empty();
+        bool hasEnvelope = ! note.pitchEnvelope.empty();
 
         // Gain factor from dB
         float gainFactor = std::pow (10.0f, note.gainDB / 20.0f);
@@ -80,6 +85,77 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
             for (int i = 0; i < driftLen; ++i)
                 noteBuf[i] = driftData[i] * gainFactor;
         }
+        else if (hasEnvelope)
+        {
+            // Pitch envelope: sub-segment processing based on control points
+            int segmentSamples = juce::jmax (256, static_cast<int> (0.02 * sampleRate));
+
+            for (int segStart = 0; segStart < srcLength; segStart += segmentSamples)
+            {
+                int segLen = juce::jmin (segmentSamples, srcLength - segStart);
+                if (segLen < 64) break;
+
+                // Compute time position within note
+                double segTimeNorm = static_cast<double> (segStart) / srcLength;
+
+                // Interpolate pitch offset from envelope
+                float pitchOffset = 0.0f;
+                if (note.pitchEnvelope.size() == 1)
+                {
+                    pitchOffset = note.pitchEnvelope[0].pitchOffsetSemitones;
+                }
+                else
+                {
+                    // Linear interpolation between surrounding control points
+                    for (size_t ci = 0; ci + 1 < note.pitchEnvelope.size(); ++ci)
+                    {
+                        const auto& cpA = note.pitchEnvelope[ci];
+                        const auto& cpB = note.pitchEnvelope[ci + 1];
+                        if (segTimeNorm >= cpA.timeNormalized && segTimeNorm <= cpB.timeNormalized)
+                        {
+                            double range = cpB.timeNormalized - cpA.timeNormalized;
+                            float t = range > 0.001 ? static_cast<float> ((segTimeNorm - cpA.timeNormalized) / range) : 0.0f;
+                            pitchOffset = cpA.pitchOffsetSemitones + t * (cpB.pitchOffsetSemitones - cpA.pitchOffsetSemitones);
+                            break;
+                        }
+                    }
+                    // Before first point
+                    if (segTimeNorm < note.pitchEnvelope.front().timeNormalized)
+                        pitchOffset = note.pitchEnvelope.front().pitchOffsetSemitones;
+                    // After last point
+                    if (segTimeNorm > note.pitchEnvelope.back().timeNormalized)
+                        pitchOffset = note.pitchEnvelope.back().pitchOffsetSemitones;
+                }
+
+                float totalPitch = note.pitchShiftSemitones + pitchOffset;
+                bool segNeedsProcessing = std::abs (totalPitch) > 0.01f
+                    || std::abs (note.formantShiftSemitones) > 0.01f
+                    || std::abs (note.durationScale - 1.0) > 0.01;
+
+                int dstOffset = static_cast<int> (static_cast<double> (segStart) / srcLength * dstLength);
+                int nextDstOffset = static_cast<int> (static_cast<double> (segStart + segLen) / srcLength * dstLength);
+                int dstSegLen = juce::jmin (nextDstOffset - dstOffset, dstLength - dstOffset);
+
+                if (dstSegLen <= 0 || dstOffset >= dstLength) continue;
+
+                if (segNeedsProcessing)
+                {
+                    auto segResult = processNote (originalData + srcStart + segStart, segLen,
+                                                    sampleRate, totalPitch,
+                                                    note.formantShiftSemitones, note.durationScale);
+                    const float* segData = segResult.getReadPointer (0);
+                    int segOutLen = juce::jmin (segResult.getNumSamples(), dstSegLen);
+                    for (int i = 0; i < segOutLen; ++i)
+                        noteBuf[dstOffset + i] = segData[i] * gainFactor;
+                }
+                else
+                {
+                    int toCopy = juce::jmin (segLen, dstSegLen);
+                    for (int i = 0; i < toCopy; ++i)
+                        noteBuf[dstOffset + i] = originalData[srcStart + segStart + i] * gainFactor;
+                }
+            }
+        }
         else if (! needsPitchTimeProcessing)
         {
             int toCopy = juce::jmin (srcLength, dstLength);
@@ -97,6 +173,72 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
 
             for (int i = 0; i < procLength; ++i)
                 noteBuf[i] = procData[i] * gainFactor;
+        }
+
+        // Apply pitch transition glide at the beginning of the note
+        if (note.transitionInDuration > 0.001f)
+        {
+            // Find previous note to glide from
+            const Note* prevNote = nullptr;
+            double closestGap = 0.1;
+            for (const auto& other : notes)
+            {
+                if (other.id == note.id || other.isMuted) continue;
+                double otherEnd = other.editedStartTime() + other.editedDuration();
+                double gap = note.editedStartTime() - otherEnd;
+                if (gap >= -0.01 && gap < closestGap)
+                {
+                    prevNote = &other;
+                    closestGap = gap;
+                }
+            }
+
+            if (prevNote != nullptr)
+            {
+                int transitionSamples = static_cast<int> (note.transitionInDuration * sampleRate);
+                transitionSamples = juce::jmin (transitionSamples, dstLength / 2);
+
+                float prevMidi = static_cast<float> (prevNote->midiNote) + prevNote->pitchShiftSemitones;
+                float curMidi = static_cast<float> (note.midiNote) + note.pitchShiftSemitones;
+                float pitchDiff = prevMidi - curMidi;
+
+                // Apply pitch ramp by reprocessing the transition region
+                if (std::abs (pitchDiff) > 0.1f && transitionSamples > 64)
+                {
+                    int subSegLen = juce::jmax (64, transitionSamples / 4);
+                    for (int segStart = 0; segStart < transitionSamples; segStart += subSegLen)
+                    {
+                        int segLen = juce::jmin (subSegLen, transitionSamples - segStart);
+                        float t = static_cast<float> (segStart + segLen / 2) / static_cast<float> (transitionSamples);
+
+                        // Shape the interpolation curve
+                        if (note.transitionInShape > 0.01f)
+                            t = std::pow (t, 1.0f + note.transitionInShape);
+                        else if (note.transitionInShape < -0.01f)
+                            t = 1.0f - std::pow (1.0f - t, 1.0f - note.transitionInShape);
+
+                        float glidePitch = pitchDiff * (1.0f - t);
+                        float totalPitch = note.pitchShiftSemitones + glidePitch;
+
+                        // Only reprocess if there's meaningful pitch difference
+                        if (std::abs (glidePitch) > 0.05f)
+                        {
+                            int srcSeg = static_cast<int> (static_cast<double> (segStart) / dstLength * srcLength);
+                            int srcSegLen = juce::jmin (segLen, srcLength - srcSeg);
+                            if (srcSegLen > 32 && srcSeg >= 0 && srcSeg < srcLength)
+                            {
+                                auto segResult = processNote (originalData + srcStart + srcSeg, srcSegLen,
+                                                                sampleRate, totalPitch,
+                                                                note.formantShiftSemitones, note.durationScale);
+                                const float* segData = segResult.getReadPointer (0);
+                                int segOutLen = juce::jmin (segResult.getNumSamples(), segLen);
+                                for (int i = 0; i < segOutLen; ++i)
+                                    noteBuf[segStart + i] = segData[i] * gainFactor;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Apply raised-cosine fade-in/fade-out at note edges
@@ -120,6 +262,9 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
     std::vector<float> noteEnvelope (static_cast<size_t> (totalSamples), 0.0f);
     for (const auto& note : notes)
     {
+        if (note.isMuted)
+            continue;
+
         int dstStart = juce::jlimit (0, totalSamples, static_cast<int> (note.editedStartTime() * sampleRate));
         int dstEnd = juce::jlimit (0, totalSamples, static_cast<int> ((note.editedStartTime() + note.editedDuration()) * sampleRate));
         int dstLength = dstEnd - dstStart;
