@@ -46,6 +46,7 @@ public:
 
     // Playback
     void startPlayback (const NoteList& editedNotes);
+    void startPlaybackFromPosition (const NoteList& editedNotes, double timeInSeconds);
     void stopPlayback();
 
     // Preview playback for note audition (renders single note, plays it)
@@ -55,9 +56,18 @@ public:
     bool getBypassEdits() const { return bypassEdits.load(); }
     void setBypassEdits (bool bypass) { bypassEdits.store (bypass); }
 
+    // Master tuning: A4 reference frequency (default 440 Hz)
+    float getA4Reference() const { return a4Reference; }
+    void setA4Reference (float freq) { a4Reference = freq; }
+
     AudioCapture& getAudioCapture() { return audioCapture; }
     PitchAnalyzer& getPitchAnalyzer() { return pitchAnalyzer; }
     AudioEngine& getAudioEngine() { return audioEngine; }
+    PitchDetector::Settings& getPitchDetectorSettings() { return pitchAnalyzer.getDetectorSettings(); }
+    NoteSegmenter& getNoteSegmenter() { return noteSegmenter; }
+
+    // Re-analyze the active take with current settings
+    void reanalyzeActiveTake();
 
     // Multi-take support
     const TakeList& getTakes() const { return takes; }
@@ -109,6 +119,9 @@ private:
 
     // A/B bypass
     std::atomic<bool> bypassEdits { false };
+
+    // Master tuning
+    float a4Reference = 440.0f;
 
     // DAW transport sync
     std::atomic<bool> captureJustStarted { false };

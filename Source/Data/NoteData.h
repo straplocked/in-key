@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <utility>
 #include <cmath>
 
 // Pitch envelope control point for per-note pitch curve editing
@@ -34,6 +35,13 @@ struct Note
     float transitionInDuration = 0.0f;  // Pitch glide-in duration in seconds (0 = instant)
     float transitionInShape = 0.0f;     // Glide shape: -1 concave, 0 linear, +1 convex
     PitchEnvelope pitchEnvelope;        // Per-note pitch curve control points (empty = use original)
+    float fadeInMs = 0.0f;             // Fade-in duration (0-100ms, default 0)
+    float fadeOutMs = 0.0f;            // Fade-out duration (0-100ms, default 0)
+    float sibilantGainDB = 0.0f;      // Sibilant region volume adjustment (-12 to +6 dB)
+    float vibratoDepthScale = 1.0f;   // Vibrato scaling (0=none, 1=original, 2=double)
+    float driftScale = 1.0f;          // Aperiodic drift scaling (0=remove, 1=original)
+    std::vector<std::pair<double,double>> sibilantRegions;  // Detected sibilant regions (startTime, endTime)
+    float vibratoRate = 0.0f;         // Detected vibrato rate in Hz (analysis result)
 
     // Check if note has any edits
     bool isEdited() const
@@ -46,7 +54,12 @@ struct Note
             || std::abs (pitchDriftScale - 1.0f) > 0.01f
             || isMuted
             || transitionInDuration > 0.001f
-            || ! pitchEnvelope.empty();
+            || ! pitchEnvelope.empty()
+            || fadeInMs > 0.01f
+            || fadeOutMs > 0.01f
+            || std::abs (sibilantGainDB) > 0.01f
+            || std::abs (vibratoDepthScale - 1.0f) > 0.01f
+            || std::abs (driftScale - 1.0f) > 0.01f;
     }
 
     // Reset all edits to defaults
@@ -62,6 +75,11 @@ struct Note
         transitionInDuration = 0.0f;
         transitionInShape = 0.0f;
         pitchEnvelope.clear();
+        fadeInMs = 0.0f;
+        fadeOutMs = 0.0f;
+        sibilantGainDB = 0.0f;
+        vibratoDepthScale = 1.0f;
+        driftScale = 1.0f;
     }
 
     // Computed helpers

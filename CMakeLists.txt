@@ -68,6 +68,8 @@ target_sources(InKey PRIVATE
     Source/Editing/QuantizationEngine.cpp
     Source/UI/InKeyLookAndFeel.cpp
     Source/Analysis/KeyDetector.cpp
+    Source/Analysis/SibilantDetector.cpp
+    Source/Analysis/VibratoAnalyzer.cpp
     Source/Data/MidiExporter.cpp
 )
 
@@ -129,6 +131,8 @@ if(BUILD_TESTS)
         Source/Alignment/DTWAligner.cpp
         Source/Audio/AudioCapture.cpp
         Source/DSP/AudioEngine.cpp
+        Source/Analysis/SibilantDetector.cpp
+        Source/Analysis/VibratoAnalyzer.cpp
     )
 
     target_include_directories(InKeyTests PRIVATE

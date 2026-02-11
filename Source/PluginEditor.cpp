@@ -109,9 +109,40 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
         pianoRollComponent.quantizePitchToScale (strength, scale);
         pianoRollComponent.repaint();
         updatePropertiesFromSelection();
-        // notesChanged already called by quantizePitchToScale via listener
     };
     addChildComponent (quantizeButton);
+
+    // Correct Pitch button (intelligent, non-linear correction)
+    correctPitchButton.setButtonText ("Correct");
+    correctPitchButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff5577cc));
+    correctPitchButton.onClick = [this]()
+    {
+        float strength = static_cast<float> (quantizeStrengthSlider.getValue()) / 100.0f;
+        auto scale = getCurrentScale();
+        pianoRollComponent.intelligentCorrectPitch (strength, scale);
+        pianoRollComponent.repaint();
+        updatePropertiesFromSelection();
+    };
+    addChildComponent (correctPitchButton);
+
+    // Auto Level button
+    levelButton.setButtonText ("Level");
+    levelButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff44aa66));
+    levelButton.onClick = [this]()
+    {
+        int activeTake = processorRef.getActiveTakeIndex();
+        if (activeTake < 0 || activeTake >= processorRef.getNumTakes())
+            return;
+
+        auto& take = processorRef.getTakes()[static_cast<size_t> (activeTake)];
+        float strength = static_cast<float> (quantizeStrengthSlider.getValue()) / 100.0f;
+        pianoRollComponent.autoLevelNotes (take.audio.getReadPointer (0),
+                                            take.audio.getNumSamples(),
+                                            take.sampleRate, strength);
+        pianoRollComponent.repaint();
+        updatePropertiesFromSelection();
+    };
+    addChildComponent (levelButton);
 
     // Scale root selector (C, C#, D, ...)
     for (int i = 0; i < 12; ++i)
@@ -132,12 +163,31 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     scaleTypeSelector.addItem ("Blues", 6);
     scaleTypeSelector.addItem ("Dorian", 7);
     scaleTypeSelector.addItem ("Mixolydian", 8);
+    scaleTypeSelector.addItem ("Custom", 9);
     scaleTypeSelector.setSelectedId (1, juce::dontSendNotification);
     scaleTypeSelector.onChange = [this]()
     {
         pianoRollComponent.setCurrentScale (getCurrentScale());
+        resized(); // re-layout to show/hide custom scale buttons
     };
     addChildComponent (scaleTypeSelector);
+
+    // Custom scale toggle buttons (12 pitch classes)
+    {
+        const char* noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        for (int i = 0; i < 12; ++i)
+        {
+            customScaleButtons[i].setButtonText (noteNames[i]);
+            customScaleButtons[i].setClickingTogglesState (true);
+            customScaleButtons[i].setToggleState (true, juce::dontSendNotification); // all on by default
+            customScaleButtons[i].setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff4488cc));
+            customScaleButtons[i].onClick = [this]()
+            {
+                pianoRollComponent.setCurrentScale (getCurrentScale());
+            };
+            addChildComponent (customScaleButtons[i]);
+        }
+    }
 
     // Quantize strength slider (0-100%)
     quantizeStrengthSlider.setRange (0.0, 100.0, 1.0);
@@ -180,6 +230,121 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
         scaleTypeSelector.setSelectedId (result.scaleTypeIndex + 1, juce::sendNotification);
     };
     addChildComponent (detectKeyButton);
+
+    // Settings button (detection settings dialog)
+    settingsButton.setButtonText ("Settings");
+    settingsButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff666688));
+    settingsButton.onClick = [this]()
+    {
+        auto* dialog = new DetectionSettingsDialog (
+            processorRef.getPitchDetectorSettings(),
+            processorRef.getNoteSegmenter().getSettings());
+        dialog->onReanalyze = [this] (PitchDetector::Settings pitchSettings,
+                                        NoteSegmenter::Settings segSettings)
+        {
+            processorRef.getPitchDetectorSettings() = pitchSettings;
+            processorRef.getNoteSegmenter().setSettings (segSettings);
+            processorRef.reanalyzeActiveTake();
+        };
+
+        juce::DialogWindow::LaunchOptions options;
+        options.content.setOwned (dialog);
+        options.dialogTitle = "Detection Settings";
+        options.dialogBackgroundColour = juce::Colour (0xff2a2a3a);
+        options.escapeKeyTriggersCloseButton = true;
+        options.useNativeTitleBar = false;
+        options.resizable = false;
+        options.launchAsync();
+    };
+    addChildComponent (settingsButton);
+
+    // Tuning (A4 reference) controls
+    tuningLabel.setText ("A4", juce::dontSendNotification);
+    tuningLabel.setColour (juce::Label::textColourId, InKeyColours::textSecondary);
+    tuningLabel.setFont (juce::Font (11.0f));
+    tuningLabel.setJustificationType (juce::Justification::centredRight);
+    addChildComponent (tuningLabel);
+
+    tuningSlider.setRange (415.0, 465.0, 0.1);
+    tuningSlider.setValue (440.0, juce::dontSendNotification);
+    tuningSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    tuningSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 45, 20);
+    tuningSlider.setTextValueSuffix (" Hz");
+    tuningSlider.setColour (juce::Slider::thumbColourId, juce::Colour (0xff888888));
+    tuningSlider.setTooltip ("A4 reference frequency (default 440 Hz)");
+    tuningSlider.onValueChange = [this]() {
+        processorRef.setA4Reference (static_cast<float> (tuningSlider.getValue()));
+    };
+    addChildComponent (tuningSlider);
+
+    // Time quantization controls
+    timeQuantizeButton.setButtonText ("Time Q");
+    timeQuantizeButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff7755aa));
+    timeQuantizeButton.onClick = [this]()
+    {
+        double bpm = bpmSlider.getValue();
+        int subdivision = 4; // default quarter note
+        switch (subdivisionSelector.getSelectedId())
+        {
+            case 1: subdivision = 1; break;   // Whole
+            case 2: subdivision = 2; break;   // Half
+            case 3: subdivision = 4; break;   // Quarter
+            case 4: subdivision = 8; break;   // Eighth
+            case 5: subdivision = 16; break;  // Sixteenth
+            default: subdivision = 4; break;
+        }
+        float strength = static_cast<float> (quantizeStrengthSlider.getValue()) / 100.0f;
+
+        // Get capture start time offset for grid alignment
+        double captureStartTime = 0.0;
+        int activeTake = processorRef.getActiveTakeIndex();
+        if (activeTake >= 0 && activeTake < processorRef.getNumTakes())
+        {
+            auto& take = processorRef.getTakes()[static_cast<size_t> (activeTake)];
+            captureStartTime = static_cast<double> (take.captureStartSampleInDAW) / take.sampleRate;
+        }
+
+        pianoRollComponent.quantizeTime (bpm, subdivision, strength, captureStartTime);
+        pianoRollComponent.repaint();
+        updatePropertiesFromSelection();
+    };
+    addChildComponent (timeQuantizeButton);
+
+    // BPM label
+    bpmLabel.setText ("BPM", juce::dontSendNotification);
+    bpmLabel.setColour (juce::Label::textColourId, InKeyColours::textSecondary);
+    bpmLabel.setFont (juce::Font (11.0f));
+    bpmLabel.setJustificationType (juce::Justification::centredRight);
+    addChildComponent (bpmLabel);
+
+    // BPM slider
+    bpmSlider.setRange (20.0, 300.0, 0.1);
+    bpmSlider.setValue (120.0, juce::dontSendNotification);
+    bpmSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    bpmSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 45, 20);
+    bpmSlider.setColour (juce::Slider::thumbColourId, juce::Colour (0xff7755aa));
+    bpmSlider.setTooltip ("Beats per minute for time quantization grid");
+    addChildComponent (bpmSlider);
+
+    // Subdivision selector
+    subdivisionSelector.addItem ("Whole", 1);
+    subdivisionSelector.addItem ("Half", 2);
+    subdivisionSelector.addItem ("Quarter", 3);
+    subdivisionSelector.addItem ("Eighth", 4);
+    subdivisionSelector.addItem ("16th", 5);
+    subdivisionSelector.setSelectedId (3, juce::dontSendNotification); // Default to quarter note
+    subdivisionSelector.setTooltip ("Beat grid subdivision for time quantization");
+    addChildComponent (subdivisionSelector);
+
+    // Try to read BPM from DAW transport
+    if (auto* playHead = processorRef.getPlayHead())
+    {
+        if (auto pos = playHead->getPosition())
+        {
+            if (auto bpm = pos->getBpm())
+                bpmSlider.setValue (*bpm, juce::dontSendNotification);
+        }
+    }
 
     // MIDI Export button
     exportMidiButton.setButtonText ("MIDI");
@@ -225,15 +390,21 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     addChildComponent (propertiesPanel);
     propertiesPanel.onPropertyChanged = [this] (int noteId, float pitchShift, float formantShift,
                                                  double timeOffset, double durationScale,
-                                                 float gainDB, float pitchDriftScale)
+                                                 float gainDB, float vibratoDepthScale,
+                                                 float driftScale, float sibilantGainDB,
+                                                 float fadeInMs, float fadeOutMs)
     {
         pianoRollComponent.editNoteProperty (noteId, pitchShift, formantShift,
-                                              timeOffset, durationScale, gainDB, pitchDriftScale);
+                                              timeOffset, durationScale, gainDB,
+                                              vibratoDepthScale, driftScale, sibilantGainDB,
+                                              fadeInMs, fadeOutMs);
         pianoRollComponent.repaint();
     };
 
     propertiesPanel.onMultiPropertyChanged = [this] (float pitchDelta, float formantDelta,
-                                                      float gainDelta, float driftDelta)
+                                                      float gainDelta, float vibratoDelta,
+                                                      float driftDelta, float sibGainDelta,
+                                                      float fadeInDelta, float fadeOutDelta)
     {
         // Apply delta to all selected notes
         const auto& selectedIds = pianoRollComponent.getSelectedNoteIds();
@@ -250,17 +421,29 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
                                                   note.formantShiftSemitones + formantDelta);
                 float newGain = juce::jlimit (-24.0f, 12.0f,
                                                note.gainDB + gainDelta);
-                float newDrift = juce::jlimit (0.0f, 2.0f,
-                                                note.pitchDriftScale + driftDelta);
+                float newVibrato = juce::jlimit (0.0f, 2.0f,
+                                                   note.vibratoDepthScale + vibratoDelta);
+                float newDrift = juce::jlimit (0.0f, 1.0f,
+                                                note.driftScale + driftDelta);
+                float newSibGain = juce::jlimit (-12.0f, 6.0f,
+                                                    note.sibilantGainDB + sibGainDelta);
+                float newFadeIn = juce::jlimit (0.0f, 100.0f,
+                                                  note.fadeInMs + fadeInDelta);
+                float newFadeOut = juce::jlimit (0.0f, 100.0f,
+                                                   note.fadeOutMs + fadeOutDelta);
                 pianoRollComponent.editNoteProperty (note.id, newPitch, newFormant,
                                                       note.timeOffset, note.durationScale,
-                                                      newGain, newDrift);
+                                                      newGain, newVibrato, newDrift,
+                                                      newSibGain, newFadeIn, newFadeOut);
             }
         }
         pianoRollComponent.repaint();
     };
 
     processorRef.getPitchAnalyzer().addListener (this);
+
+    // Restore tuning slider from processor state
+    tuningSlider.setValue (static_cast<double> (processorRef.getA4Reference()), juce::dontSendNotification);
 
     // Restore state if editor re-opened with existing takes
     if (processorRef.getState() == PluginState::EDITING
@@ -291,14 +474,18 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
     undoButton.setTooltip ("Undo last edit (Cmd+Z)");
     redoButton.setTooltip ("Redo last edit (Cmd+Shift+Z)");
     quantizeButton.setTooltip ("Snap notes to scale (Q)");
+    correctPitchButton.setTooltip ("Intelligent pitch correction — far-off notes get more correction");
+    levelButton.setTooltip ("Auto-level note volumes to a uniform level");
     resetButton.setTooltip ("Reset all edits to original");
     abToggleButton.setTooltip ("Toggle A/B comparison (B)");
     alignButton.setTooltip ("Align active take to reference using DTW");
     detectKeyButton.setTooltip ("Auto-detect musical key");
     exportMidiButton.setTooltip ("Export notes as MIDI file");
+    settingsButton.setTooltip ("Adjust pitch detection and note segmentation settings");
     scaleRootSelector.setTooltip ("Scale root note");
     scaleTypeSelector.setTooltip ("Scale type");
     quantizeStrengthSlider.setTooltip ("Quantize strength (0-100%)");
+    timeQuantizeButton.setTooltip ("Snap note start times to beat grid (T)");
 
     setResizable (true, true);
     setResizeLimits (700, 500, 1800, 1200);
@@ -376,6 +563,8 @@ void InKeyEditor::resized()
     undoButton.setBounds (topBar.removeFromLeft (70).reduced (10, 10));
     redoButton.setBounds (topBar.removeFromLeft (70).reduced (10, 10));
     quantizeButton.setBounds (topBar.removeFromLeft (90).reduced (10, 10));
+    correctPitchButton.setBounds (topBar.removeFromLeft (80).reduced (10, 10));
+    levelButton.setBounds (topBar.removeFromLeft (70).reduced (10, 10));
     resetButton.setBounds (topBar.removeFromLeft (80).reduced (10, 10));
     abToggleButton.setBounds (topBar.removeFromLeft (55).reduced (10, 10));
     exportMidiButton.setBounds (topBar.removeFromLeft (60).reduced (10, 10));
@@ -391,6 +580,33 @@ void InKeyEditor::resized()
     quantizeStrengthSlider.setBounds (scaleBar.removeFromLeft (150).reduced (4, 4));
     scaleBar.removeFromLeft (4);
     detectKeyButton.setBounds (scaleBar.removeFromLeft (65).reduced (4, 4));
+    settingsButton.setBounds (scaleBar.removeFromLeft (75).reduced (4, 4));
+    scaleBar.removeFromLeft (8);
+    tuningLabel.setBounds (scaleBar.removeFromLeft (22).reduced (4, 4));
+    tuningSlider.setBounds (scaleBar.removeFromLeft (130).reduced (4, 4));
+    scaleBar.removeFromLeft (8);
+    timeQuantizeButton.setBounds (scaleBar.removeFromLeft (65).reduced (4, 4));
+    bpmLabel.setBounds (scaleBar.removeFromLeft (28).reduced (4, 4));
+    bpmSlider.setBounds (scaleBar.removeFromLeft (120).reduced (4, 4));
+    subdivisionSelector.setBounds (scaleBar.removeFromLeft (80).reduced (4, 4));
+
+    // Optional row 3: custom scale note toggles (only when "Custom" is selected)
+    bool isCustomScale = (scaleTypeSelector.getSelectedId() == 9);
+    if (isCustomScale && showPianoRoll)
+    {
+        auto customRow = area.removeFromTop (28);
+        customRow.removeFromLeft (260);
+        for (int i = 0; i < 12; ++i)
+        {
+            int btnWidth = (i == 1 || i == 3 || i == 6 || i == 8 || i == 10) ? 28 : 24; // sharps slightly wider
+            customScaleButtons[i].setBounds (customRow.removeFromLeft (btnWidth).reduced (1, 2));
+        }
+    }
+    else
+    {
+        for (int i = 0; i < 12; ++i)
+            customScaleButtons[i].setBounds (0, 0, 0, 0);
+    }
 
     // Properties panel at bottom
     static constexpr int propertiesHeight = 44;
@@ -421,14 +637,24 @@ void InKeyEditor::timerCallback()
         undoButton.setVisible (false);
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
+        correctPitchButton.setVisible (false);
+        levelButton.setVisible (false);
         resetButton.setVisible (false);
         abToggleButton.setVisible (false);
         detectKeyButton.setVisible (false);
         exportMidiButton.setVisible (false);
+        settingsButton.setVisible (false);
         propertiesPanel.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
         quantizeStrengthSlider.setVisible (false);
+        tuningLabel.setVisible (false);
+        tuningSlider.setVisible (false);
+        timeQuantizeButton.setVisible (false);
+        bpmLabel.setVisible (false);
+        bpmSlider.setVisible (false);
+        subdivisionSelector.setVisible (false);
+        for (auto& btn : customScaleButtons) btn.setVisible (false);
 
         auto duration = processorRef.getAudioCapture().getCapturedDurationSeconds();
         statusLabel.setText ("Recording... " + juce::String (duration, 1) + "s",
@@ -457,14 +683,43 @@ void InKeyEditor::timerCallback()
         undoButton.setVisible (showPianoRoll);
         redoButton.setVisible (showPianoRoll);
         quantizeButton.setVisible (showPianoRoll);
+        correctPitchButton.setVisible (showPianoRoll);
+        levelButton.setVisible (showPianoRoll);
         resetButton.setVisible (showPianoRoll);
         abToggleButton.setVisible (showPianoRoll);
         detectKeyButton.setVisible (showPianoRoll);
         exportMidiButton.setVisible (showPianoRoll);
+        settingsButton.setVisible (showPianoRoll);
         propertiesPanel.setVisible (showPianoRoll);
         scaleRootSelector.setVisible (showPianoRoll);
         scaleTypeSelector.setVisible (showPianoRoll);
         quantizeStrengthSlider.setVisible (showPianoRoll);
+        tuningLabel.setVisible (showPianoRoll);
+        tuningSlider.setVisible (showPianoRoll);
+        timeQuantizeButton.setVisible (showPianoRoll);
+        bpmLabel.setVisible (showPianoRoll);
+        bpmSlider.setVisible (showPianoRoll);
+        subdivisionSelector.setVisible (showPianoRoll);
+        {
+            bool customVis = showPianoRoll && (scaleTypeSelector.getSelectedId() == 9);
+            for (auto& btn : customScaleButtons) btn.setVisible (customVis);
+        }
+
+        // Try to update BPM from DAW transport if still at default
+        if (showPianoRoll)
+        {
+            if (auto* playHead = processorRef.getPlayHead())
+            {
+                if (auto pos = playHead->getPosition())
+                {
+                    if (auto bpm = pos->getBpm())
+                    {
+                        if (*bpm > 0.0 && std::abs (bpmSlider.getValue() - 120.0) < 0.01)
+                            bpmSlider.setValue (*bpm, juce::dontSendNotification);
+                    }
+                }
+            }
+        }
 
         // Show take selector and align button when there are 2+ takes
         bool multiTake = processorRef.getNumTakes() > 1;
@@ -547,14 +802,24 @@ void InKeyEditor::timerCallback()
         undoButton.setVisible (false);
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
+        correctPitchButton.setVisible (false);
+        levelButton.setVisible (false);
         resetButton.setVisible (false);
         abToggleButton.setVisible (false);
         detectKeyButton.setVisible (false);
         exportMidiButton.setVisible (false);
+        settingsButton.setVisible (false);
         alignButton.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
         quantizeStrengthSlider.setVisible (false);
+        tuningLabel.setVisible (false);
+        tuningSlider.setVisible (false);
+        timeQuantizeButton.setVisible (false);
+        bpmLabel.setVisible (false);
+        bpmSlider.setVisible (false);
+        subdivisionSelector.setVisible (false);
+        for (auto& btn : customScaleButtons) btn.setVisible (false);
 
         double pos = processorRef.getAudioEngine().getPlaybackPosition();
         pianoRollComponent.setPlayheadPosition (pos);
@@ -573,14 +838,24 @@ void InKeyEditor::timerCallback()
         undoButton.setVisible (false);
         redoButton.setVisible (false);
         quantizeButton.setVisible (false);
+        correctPitchButton.setVisible (false);
+        levelButton.setVisible (false);
         resetButton.setVisible (false);
         abToggleButton.setVisible (false);
         detectKeyButton.setVisible (false);
         exportMidiButton.setVisible (false);
+        settingsButton.setVisible (false);
         propertiesPanel.setVisible (false);
         scaleRootSelector.setVisible (false);
         scaleTypeSelector.setVisible (false);
         quantizeStrengthSlider.setVisible (false);
+        tuningLabel.setVisible (false);
+        tuningSlider.setVisible (false);
+        timeQuantizeButton.setVisible (false);
+        bpmLabel.setVisible (false);
+        bpmSlider.setVisible (false);
+        subdivisionSelector.setVisible (false);
+        for (auto& btn : customScaleButtons) btn.setVisible (false);
 
         statusLabel.setText ("Ready — press Capture to record", juce::dontSendNotification);
     }
@@ -667,6 +942,14 @@ void InKeyEditor::noteAuditionRequested (const Note& note)
             trimmed.copyFrom (0, 0, rendered, 0, startSample, length);
             processorRef.startPreviewPlayback (trimmed, take.sampleRate);
         }
+    }
+}
+
+void InKeyEditor::playFromPositionRequested (double timeInSeconds)
+{
+    if (processorRef.getState() == PluginState::EDITING && showPianoRoll)
+    {
+        processorRef.startPlaybackFromPosition (pianoRollComponent.getNotes(), timeInSeconds);
     }
 }
 
@@ -788,6 +1071,17 @@ ScaleDefinition InKeyEditor::getCurrentScale() const
         case 6:  return QuantizationEngine::bluesScale (root);
         case 7:  return QuantizationEngine::dorianScale (root);
         case 8:  return QuantizationEngine::mixolydianScale (root);
+        case 9:
+        {
+            // Custom scale: read toggle states
+            ScaleDefinition custom;
+            custom.name = "Custom";
+            custom.rootNote = root;
+            custom.degrees.resize (12, false);
+            for (int i = 0; i < 12; ++i)
+                custom.degrees[static_cast<size_t> (i)] = customScaleButtons[i].getToggleState();
+            return custom;
+        }
         default: return QuantizationEngine::chromaticScale (root);
     }
 }
@@ -834,6 +1128,13 @@ bool InKeyEditor::keyPressed (const juce::KeyPress& key)
         pianoRollComponent.quantizePitchToScale (strength, scale);
         pianoRollComponent.repaint();
         updatePropertiesFromSelection();
+        return true;
+    }
+
+    // T = Quantize time (using current BPM/subdivision/strength settings)
+    if (key == juce::KeyPress ('t') && showPianoRoll && state == PluginState::EDITING)
+    {
+        timeQuantizeButton.triggerClick();
         return true;
     }
 

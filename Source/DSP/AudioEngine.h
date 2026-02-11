@@ -21,6 +21,7 @@ public:
 
     // Playback state
     void startPlayback (const juce::AudioBuffer<float>& renderedAudio, double sampleRate);
+    void startPlaybackFromSample (const juce::AudioBuffer<float>& renderedAudio, double sampleRate, int startSample);
     void stopPlayback();
     bool isPlaying() const { return playing.load(); }
 

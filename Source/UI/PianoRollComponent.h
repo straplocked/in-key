@@ -25,13 +25,24 @@ public:
     // Edit a note's properties (records undo action)
     void editNoteProperty (int noteId, float pitchShift, float formantShift,
                            double timeOffset, double durationScale,
-                           float gainDB = 0.0f, float pitchDriftScale = 1.0f);
+                           float gainDB = 0.0f, float vibratoDepthScale = 1.0f,
+                           float driftScale = 1.0f, float sibilantGainDB = 0.0f,
+                           float fadeInMs = -1.0f, float fadeOutMs = -1.0f);
 
     // Quantize notes' pitch (chromatic, full strength — legacy)
     void quantizePitch();
 
     // Quantize with scale and strength control
     void quantizePitchToScale (float strength, const ScaleDefinition& scale);
+
+    // Intelligent pitch correction: far-off notes get more correction than close ones
+    void intelligentCorrectPitch (float strength, const ScaleDefinition& scale);
+
+    // Quantize note start times to a beat grid
+    void quantizeTime (double bpm, int subdivision, float strength, double captureStartTime);
+
+    // Auto-level note volumes to a uniform RMS
+    void autoLevelNotes (const float* audioData, int numSamples, double sampleRate, float strength);
 
     // Set current scale for grid visualization (empty = chromatic / no shading)
     void setCurrentScale (const ScaleDefinition& scale) { currentScale = scale; repaint(); }
@@ -91,6 +102,7 @@ public:
         virtual void noteEdited (const Note& note) = 0;
         virtual void notesChanged() {}  // Called when notes are modified and need re-render
         virtual void noteAuditionRequested (const Note& note) { juce::ignoreUnused (note); }
+        virtual void playFromPositionRequested (double timeInSeconds) { juce::ignoreUnused (timeInSeconds); }
     };
 
     void addListener (Listener* listener);
@@ -126,6 +138,10 @@ private:
     enum class DragMode { None, MoveNote, ResizeLeft, ResizeRight, MoveBoundary, DragControlPoint, DragTransition };
     DragMode dragMode = DragMode::None;
     int dragNoteId = -1;
+
+    // Smart tool: constrain drag to vertical (pitch only) or horizontal (time only)
+    enum class DragConstraint { None, VerticalOnly, HorizontalOnly };
+    DragConstraint dragConstraint = DragConstraint::None;
     float dragStartX = 0.0f;
     float dragStartY = 0.0f;
     // Snapshot of note state before drag began (single note for resize, multi for move)

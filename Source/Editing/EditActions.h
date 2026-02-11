@@ -20,6 +20,11 @@ public:
         float transitionInDuration = 0.0f;
         float transitionInShape = 0.0f;
         PitchEnvelope pitchEnvelope;
+        float fadeInMs = 0.0f;
+        float fadeOutMs = 0.0f;
+        float sibilantGainDB = 0.0f;
+        float vibratoDepthScale = 1.0f;
+        float driftScale = 1.0f;
 
         // Centralized helpers to avoid field-by-field copies everywhere
         static EditState fromNote (const Note& note)
@@ -35,6 +40,11 @@ public:
             s.transitionInDuration = note.transitionInDuration;
             s.transitionInShape = note.transitionInShape;
             s.pitchEnvelope = note.pitchEnvelope;
+            s.fadeInMs = note.fadeInMs;
+            s.fadeOutMs = note.fadeOutMs;
+            s.sibilantGainDB = note.sibilantGainDB;
+            s.vibratoDepthScale = note.vibratoDepthScale;
+            s.driftScale = note.driftScale;
             return s;
         }
 
@@ -50,6 +60,11 @@ public:
             note.transitionInDuration = transitionInDuration;
             note.transitionInShape = transitionInShape;
             note.pitchEnvelope = pitchEnvelope;
+            note.fadeInMs = fadeInMs;
+            note.fadeOutMs = fadeOutMs;
+            note.sibilantGainDB = sibilantGainDB;
+            note.vibratoDepthScale = vibratoDepthScale;
+            note.driftScale = driftScale;
         }
     };
 

@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "../Analysis/VibratoAnalyzer.h"
 #include <rubberband/RubberBandStretcher.h>
 #include <cmath>
 #include <algorithm>
@@ -62,7 +63,11 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
                                      || std::abs (note.formantShiftSemitones) > 0.01f
                                      || std::abs (note.durationScale - 1.0) > 0.01;
 
-        bool hasDrift = std::abs (note.pitchDriftScale - 1.0f) > 0.01f && ! pitchCurve.empty();
+        bool hasDrift = (std::abs (note.pitchDriftScale - 1.0f) > 0.01f
+                         || (note.vibratoRate > 0.1f
+                             && (std::abs (note.vibratoDepthScale - 1.0f) > 0.01f
+                                 || std::abs (note.driftScale - 1.0f) > 0.01f)))
+                        && ! pitchCurve.empty();
         bool hasEnvelope = ! note.pitchEnvelope.empty();
 
         // Gain factor from dB
@@ -237,6 +242,79 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Apply user-specified note fades (separate from crossfade)
+        if (note.fadeInMs > 0.01f)
+        {
+            int fadeInSamples = juce::jmin (static_cast<int> (note.fadeInMs * 0.001 * sampleRate),
+                                             dstLength / 2);
+            for (int i = 0; i < fadeInSamples; ++i)
+            {
+                float fade = static_cast<float> (i) / static_cast<float> (fadeInSamples);
+                noteBuf[i] *= fade;
+            }
+        }
+
+        if (note.fadeOutMs > 0.01f)
+        {
+            int fadeOutSamples = juce::jmin (static_cast<int> (note.fadeOutMs * 0.001 * sampleRate),
+                                              dstLength / 2);
+            for (int i = 0; i < fadeOutSamples; ++i)
+            {
+                float fade = static_cast<float> (i) / static_cast<float> (fadeOutSamples);
+                noteBuf[dstLength - 1 - i] *= fade;
+            }
+        }
+
+        // Sibilant preservation: replace pitch-shifted audio with original in sibilant regions
+        if (! note.sibilantRegions.empty())
+        {
+            float sibilantGain = std::pow (10.0f, note.sibilantGainDB / 20.0f) * gainFactor;
+            int sibFadeSamples = static_cast<int> (0.003 * sampleRate); // 3ms crossfade
+
+            for (const auto& region : note.sibilantRegions)
+            {
+                // Map sibilant region (original time) to position within the note buffer
+                double relStart = (region.first - note.startTime) / note.duration;
+                double relEnd = (region.second - note.startTime) / note.duration;
+                relStart = juce::jlimit (0.0, 1.0, relStart);
+                relEnd = juce::jlimit (0.0, 1.0, relEnd);
+
+                int sibDstStart = static_cast<int> (relStart * dstLength);
+                int sibDstEnd = static_cast<int> (relEnd * dstLength);
+                sibDstStart = juce::jlimit (0, dstLength, sibDstStart);
+                sibDstEnd = juce::jlimit (0, dstLength, sibDstEnd);
+
+                // Source samples from original audio
+                int sibSrcStart = static_cast<int> (region.first * sampleRate);
+                sibSrcStart = juce::jlimit (0, totalSamples, sibSrcStart);
+
+                int sibFade = juce::jmin (sibFadeSamples, (sibDstEnd - sibDstStart) / 4);
+
+                for (int i = sibDstStart; i < sibDstEnd; ++i)
+                {
+                    int srcIdx = sibSrcStart + (i - sibDstStart);
+                    if (srcIdx < 0 || srcIdx >= totalSamples) continue;
+
+                    float origSample = originalData[srcIdx] * sibilantGain;
+                    float crossfade = 1.0f;
+
+                    // Crossfade in at start of sibilant region
+                    int fromStart = i - sibDstStart;
+                    if (fromStart < sibFade && sibFade > 0)
+                        crossfade = static_cast<float> (fromStart) / static_cast<float> (sibFade);
+
+                    // Crossfade out at end of sibilant region
+                    int fromEnd = sibDstEnd - 1 - i;
+                    if (fromEnd < sibFade && sibFade > 0)
+                        crossfade = juce::jmin (crossfade,
+                                                  static_cast<float> (fromEnd) / static_cast<float> (sibFade));
+
+                    // Blend: crossfade from processed to original
+                    noteBuf[i] = noteBuf[i] * (1.0f - crossfade) + origSample * crossfade;
                 }
             }
         }
@@ -427,10 +505,27 @@ juce::AudioBuffer<float> AudioEngine::processNoteWithDrift (const float* input, 
         if (segCount > 0)
             segMidi = segSum / static_cast<float> (segCount);
 
-        // Drift correction: at driftScale=0, flatten to average (correct all deviation)
-        // at driftScale=1, no change. at driftScale=2, double the deviation.
+        // Decompose deviation into vibrato + drift if vibrato was detected
         float deviation = segMidi - avgMidi;
-        float targetDeviation = deviation * note.pitchDriftScale;
+        float targetDeviation;
+
+        if (note.vibratoRate > 0.1f
+            && (std::abs (note.vibratoDepthScale - 1.0f) > 0.01f
+                || std::abs (note.driftScale - 1.0f) > 0.01f))
+        {
+            // Use vibrato-aware decomposition
+            double segTimeMid = segTimeStart + static_cast<double> (segLen) / (2.0 * sampleRate);
+            targetDeviation = VibratoAnalyzer::decomposePitchDeviation (
+                deviation, avgMidi, segMidi, segTimeMid,
+                note.startTime, note.vibratoRate,
+                note.vibratoDepthScale, note.driftScale);
+        }
+        else
+        {
+            // Legacy: uniform scaling with pitchDriftScale
+            targetDeviation = deviation * note.pitchDriftScale;
+        }
+
         float driftCorrection = targetDeviation - deviation;
 
         // Total pitch shift for this segment
@@ -507,6 +602,16 @@ void AudioEngine::startPlayback (const juce::AudioBuffer<float>& renderedAudio, 
     playbackBuffer.makeCopyOf (renderedAudio);
     playbackSampleRate = sampleRate;
     playbackPosition.store (0);
+    rampUpRemaining.store (kRampSamples);
+    playing.store (true);
+}
+
+void AudioEngine::startPlaybackFromSample (const juce::AudioBuffer<float>& renderedAudio, double sampleRate, int startSample)
+{
+    playbackBuffer.makeCopyOf (renderedAudio);
+    playbackSampleRate = sampleRate;
+    int clamped = juce::jlimit (0, playbackBuffer.getNumSamples(), startSample);
+    playbackPosition.store (clamped);
     rampUpRemaining.store (kRampSamples);
     playing.store (true);
 }

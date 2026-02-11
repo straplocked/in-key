@@ -2,6 +2,8 @@
 #include "PluginEditor.h"
 #include "Alignment/MFCCExtractor.h"
 #include "Alignment/DTWAligner.h"
+#include "Analysis/SibilantDetector.h"
+#include "Analysis/VibratoAnalyzer.h"
 
 InKeyProcessor::InKeyProcessor()
     : AudioProcessor (BusesProperties()
@@ -184,6 +186,31 @@ void InKeyProcessor::startPlayback (const NoteList& editedNotes)
     currentState.store (PluginState::PLAYING);
 }
 
+void InKeyProcessor::startPlaybackFromPosition (const NoteList& editedNotes, double timeInSeconds)
+{
+    if (currentState.load() != PluginState::EDITING)
+        return;
+
+    if (activeTakeIndex < 0 || activeTakeIndex >= static_cast<int> (takes.size()))
+        return;
+
+    auto& take = takes[static_cast<size_t> (activeTakeIndex)];
+
+    if (bypassEdits.load())
+    {
+        int seekSample = static_cast<int> (timeInSeconds * take.sampleRate);
+        audioEngine.startPlaybackFromSample (take.audio, take.sampleRate, seekSample);
+    }
+    else
+    {
+        auto rendered = audioEngine.render (take.audio, take.sampleRate, editedNotes, take.pitchCurve);
+        int seekSample = static_cast<int> (timeInSeconds * take.sampleRate);
+        audioEngine.startPlaybackFromSample (rendered, take.sampleRate, seekSample);
+    }
+
+    currentState.store (PluginState::PLAYING);
+}
+
 void InKeyProcessor::stopPlayback()
 {
     if (currentState.load() != PluginState::PLAYING)
@@ -207,6 +234,25 @@ void InKeyProcessor::analysisComplete()
 {
     auto pitchResult = pitchAnalyzer.getResult();
     auto notes = noteSegmenter.segment (pitchResult);
+
+    // Run sibilant detection on each note
+    {
+        SibilantDetector sibilantDetector;
+        const auto& capturedAudio = audioCapture.getCapturedAudio();
+        if (capturedAudio.getNumSamples() > 0)
+        {
+            sibilantDetector.detectForNotes (notes, capturedAudio.getReadPointer (0),
+                                              capturedAudio.getNumSamples(),
+                                              audioCapture.getSampleRate());
+        }
+    }
+
+    // Run vibrato analysis on each note
+    for (auto& note : notes)
+    {
+        auto vibratoInfo = VibratoAnalyzer::analyzeNote (pitchResult, note.startTime, note.endTime());
+        note.vibratoRate = vibratoInfo.vibratoRate;
+    }
 
     // Create a new take from the capture
     Take take;
@@ -318,6 +364,20 @@ bool InKeyProcessor::alignActiveTakeToReference()
     return true;
 }
 
+void InKeyProcessor::reanalyzeActiveTake()
+{
+    if (activeTakeIndex < 0 || activeTakeIndex >= static_cast<int> (takes.size()))
+        return;
+
+    auto& take = takes[static_cast<size_t> (activeTakeIndex)];
+    if (take.audio.getNumSamples() == 0)
+        return;
+
+    // Re-run analysis with current settings on the active take's audio
+    currentState.store (PluginState::ANALYZING);
+    pitchAnalyzer.startAnalysis (take.audio, take.sampleRate);
+}
+
 void InKeyProcessor::requestRender()
 {
     renderNeeded.store (true);
@@ -375,6 +435,7 @@ void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
     state.setProperty ("activeTakeIndex", activeTakeIndex, nullptr);
     state.setProperty ("referenceTakeIndex", referenceTakeIndex, nullptr);
     state.setProperty ("nextTakeId", nextTakeId, nullptr);
+    state.setProperty ("a4Reference", static_cast<double> (a4Reference), nullptr);
 
     auto currentPluginState = currentState.load();
     state.setProperty ("pluginState",
@@ -437,6 +498,26 @@ void InKeyProcessor::getStateInformation (juce::MemoryBlock& destData)
             noteTree.setProperty ("isMuted", note.isMuted, nullptr);
             noteTree.setProperty ("transitionInDuration", static_cast<double> (note.transitionInDuration), nullptr);
             noteTree.setProperty ("transitionInShape", static_cast<double> (note.transitionInShape), nullptr);
+            noteTree.setProperty ("fadeInMs", static_cast<double> (note.fadeInMs), nullptr);
+            noteTree.setProperty ("fadeOutMs", static_cast<double> (note.fadeOutMs), nullptr);
+            noteTree.setProperty ("sibilantGainDB", static_cast<double> (note.sibilantGainDB), nullptr);
+            noteTree.setProperty ("vibratoDepthScale", static_cast<double> (note.vibratoDepthScale), nullptr);
+            noteTree.setProperty ("driftScale", static_cast<double> (note.driftScale), nullptr);
+            noteTree.setProperty ("vibratoRate", static_cast<double> (note.vibratoRate), nullptr);
+
+            // Serialize sibilant regions
+            if (! note.sibilantRegions.empty())
+            {
+                juce::ValueTree sibTree ("SibilantRegions");
+                for (const auto& region : note.sibilantRegions)
+                {
+                    juce::ValueTree regionTree ("Region");
+                    regionTree.setProperty ("start", region.first, nullptr);
+                    regionTree.setProperty ("end", region.second, nullptr);
+                    sibTree.appendChild (regionTree, nullptr);
+                }
+                noteTree.appendChild (sibTree, nullptr);
+            }
 
             // Serialize pitch envelope control points
             if (! note.pitchEnvelope.empty())
@@ -479,6 +560,7 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
     activeTakeIndex = state.getProperty ("activeTakeIndex", -1);
     referenceTakeIndex = state.getProperty ("referenceTakeIndex", 0);
     nextTakeId = state.getProperty ("nextTakeId", 1);
+    a4Reference = static_cast<float> ((double) state.getProperty ("a4Reference", 440.0));
 
     // Restore takes
     for (int ti = 0; ti < state.getNumChildren(); ++ti)
@@ -552,6 +634,25 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
                 note.isMuted = noteTree.getProperty ("isMuted", false);
                 note.transitionInDuration = static_cast<float> ((double) noteTree.getProperty ("transitionInDuration", 0.0));
                 note.transitionInShape = static_cast<float> ((double) noteTree.getProperty ("transitionInShape", 0.0));
+                note.fadeInMs = static_cast<float> ((double) noteTree.getProperty ("fadeInMs", 0.0));
+                note.fadeOutMs = static_cast<float> ((double) noteTree.getProperty ("fadeOutMs", 0.0));
+                note.sibilantGainDB = static_cast<float> ((double) noteTree.getProperty ("sibilantGainDB", 0.0));
+                note.vibratoDepthScale = static_cast<float> ((double) noteTree.getProperty ("vibratoDepthScale", 1.0));
+                note.driftScale = static_cast<float> ((double) noteTree.getProperty ("driftScale", 1.0));
+                note.vibratoRate = static_cast<float> ((double) noteTree.getProperty ("vibratoRate", 0.0));
+
+                // Restore sibilant regions
+                auto sibTree = noteTree.getChildWithName ("SibilantRegions");
+                if (sibTree.isValid())
+                {
+                    for (int si = 0; si < sibTree.getNumChildren(); ++si)
+                    {
+                        auto regionTree = sibTree.getChild (si);
+                        double start = regionTree.getProperty ("start", 0.0);
+                        double end = regionTree.getProperty ("end", 0.0);
+                        note.sibilantRegions.push_back ({ start, end });
+                    }
+                }
 
                 // Restore pitch envelope
                 auto envTree = noteTree.getChildWithName ("PitchEnvelope");

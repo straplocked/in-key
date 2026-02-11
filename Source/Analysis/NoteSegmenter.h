@@ -20,6 +20,7 @@ public:
     NoteSegmenter();
 
     void setSettings (const Settings& settings);
+    const Settings& getSettings() const { return settings; }
 
     // Segment a pitch curve into notes.
     NoteList segment (const PitchCurve& pitchCurve) const;
