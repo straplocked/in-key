@@ -114,20 +114,57 @@ juce::AudioBuffer<float> AudioEngine::render (const juce::AudioBuffer<float>& or
             outputData[dstStart + i] += noteBuf[i];
     }
 
-    // Fill gaps between notes with original audio (unvoiced regions)
-    std::vector<bool> covered (static_cast<size_t> (totalSamples), false);
+    // Build note envelope that mirrors the per-note raised-cosine fades.
+    // This lets us smoothly crossfade between note audio and gap (original) audio
+    // at note boundaries, avoiding discontinuities.
+    std::vector<float> noteEnvelope (static_cast<size_t> (totalSamples), 0.0f);
     for (const auto& note : notes)
     {
         int dstStart = juce::jlimit (0, totalSamples, static_cast<int> (note.editedStartTime() * sampleRate));
         int dstEnd = juce::jlimit (0, totalSamples, static_cast<int> ((note.editedStartTime() + note.editedDuration()) * sampleRate));
-        for (int i = dstStart; i < dstEnd; ++i)
-            covered[static_cast<size_t> (i)] = true;
+        int dstLength = dstEnd - dstStart;
+        if (dstLength <= 0) continue;
+
+        int fadeLen = juce::jmin (crossfadeSamples, dstLength / 2);
+
+        for (int i = 0; i < dstLength; ++i)
+        {
+            float env = 1.0f;
+            if (i < fadeLen)
+            {
+                env = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                  * static_cast<float> (i) / static_cast<float> (fadeLen)));
+            }
+            else if (i >= dstLength - fadeLen)
+            {
+                int fromEnd = dstLength - 1 - i;
+                env = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                  * static_cast<float> (fromEnd) / static_cast<float> (fadeLen)));
+            }
+
+            auto idx = static_cast<size_t> (dstStart + i);
+            noteEnvelope[idx] = juce::jmax (noteEnvelope[idx], env);
+        }
     }
 
+    // Blend gap audio: where noteEnvelope < 1.0, mix in original audio.
+    // Note audio was already faded by the same envelope shape, so
+    // note * env + original * (1 - env) = smooth crossfade at boundaries.
     for (int i = 0; i < totalSamples; ++i)
     {
-        if (! covered[static_cast<size_t> (i)])
-            outputData[i] = originalData[i];
+        float env = noteEnvelope[static_cast<size_t> (i)];
+        if (env < 0.999f)
+            outputData[i] += originalData[i] * (1.0f - env);
+    }
+
+    // Apply short fade at rendered buffer edges to prevent pops when
+    // playback starts/stops at the buffer boundaries
+    int bufferFadeLen = juce::jmin (256, totalSamples / 2);
+    for (int i = 0; i < bufferFadeLen; ++i)
+    {
+        float fade = static_cast<float> (i) / static_cast<float> (bufferFadeLen);
+        outputData[i] *= fade;
+        outputData[totalSamples - 1 - i] *= fade;
     }
 
     return output;
@@ -212,12 +249,13 @@ juce::AudioBuffer<float> AudioEngine::processNoteWithDrift (const float* input, 
     else
         avgMidi = static_cast<float> (note.midiNote);
 
-    // Process each sub-segment with its own pitch correction
+    // Process each sub-segment with its own pitch correction.
+    // Use overlap-add with raised-cosine crossfades at segment boundaries.
     juce::AudioBuffer<float> output (1, numSamples * 2); // extra space for time stretching
     output.clear();
     int outputPos = 0;
 
-    int crossLen = juce::jmin (static_cast<int> (0.003 * sampleRate), segmentSamples / 4);
+    int crossLen = juce::jmin (static_cast<int> (0.005 * sampleRate), segmentSamples / 4); // 5ms
 
     for (int segStart = 0; segStart < numSamples; segStart += segmentSamples)
     {
@@ -257,41 +295,55 @@ juce::AudioBuffer<float> AudioEngine::processNoteWithDrift (const float* input, 
                             || std::abs (note.formantShiftSemitones) > 0.01f
                             || std::abs (note.durationScale - 1.0) > 0.01;
 
-        if (! needsProcessing)
+        // Get segment audio (processed or direct)
+        juce::AudioBuffer<float> segResult;
+        if (needsProcessing)
         {
-            // Direct copy
-            int copyLen = juce::jmin (segLen, output.getNumSamples() - outputPos);
-            float* outPtr = output.getWritePointer (0);
-            for (int i = 0; i < copyLen; ++i)
-                outPtr[outputPos + i] = input[segStart + i];
-            outputPos += copyLen;
+            segResult = processNote (input + segStart, segLen, sampleRate,
+                                      totalPitchShift, note.formantShiftSemitones,
+                                      note.durationScale);
         }
         else
         {
-            auto segResult = processNote (input + segStart, segLen, sampleRate,
-                                           totalPitchShift, note.formantShiftSemitones,
-                                           note.durationScale);
-
-            int resultLen = juce::jmin (segResult.getNumSamples(),
-                                         output.getNumSamples() - outputPos);
-            const float* segData = segResult.getReadPointer (0);
-            float* outPtr = output.getWritePointer (0);
-
-            // Apply short crossfade at segment boundary to avoid clicks
-            for (int i = 0; i < resultLen; ++i)
-            {
-                if (i < crossLen && outputPos > 0)
-                {
-                    float fade = static_cast<float> (i) / static_cast<float> (crossLen);
-                    outPtr[outputPos + i] = outPtr[outputPos + i] * (1.0f - fade) + segData[i] * fade;
-                }
-                else
-                {
-                    outPtr[outputPos + i] = segData[i];
-                }
-            }
-            outputPos += resultLen;
+            segResult.setSize (1, segLen);
+            segResult.copyFrom (0, 0, input + segStart, segLen);
         }
+
+        int resultLen = juce::jmin (segResult.getNumSamples(),
+                                     output.getNumSamples() - outputPos);
+        const float* segData = segResult.getReadPointer (0);
+        float* outPtr = output.getWritePointer (0);
+
+        bool isFirstSeg = (segStart == 0);
+        bool isLastSeg = (segStart + segmentSamples >= numSamples);
+
+        // Apply raised-cosine crossfade at segment boundaries
+        for (int i = 0; i < resultLen; ++i)
+        {
+            float window = 1.0f;
+
+            // Fade-in at segment start (skip for first segment)
+            if (i < crossLen && ! isFirstSeg)
+            {
+                window = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                     * static_cast<float> (i) / static_cast<float> (crossLen)));
+            }
+            // Fade-out at segment end (skip for last segment)
+            else if (i >= resultLen - crossLen && ! isLastSeg)
+            {
+                int fromEnd = resultLen - 1 - i;
+                window = 0.5f * (1.0f - std::cos (juce::MathConstants<float>::pi
+                                                     * static_cast<float> (fromEnd) / static_cast<float> (crossLen)));
+            }
+
+            outPtr[outputPos + i] += segData[i] * window;
+        }
+
+        // Advance by segment length minus overlap so segments overlap at boundaries
+        int advance = resultLen;
+        if (! isLastSeg)
+            advance = juce::jmax (1, resultLen - crossLen);
+        outputPos += advance;
     }
 
     // Trim output to actual length
@@ -310,6 +362,7 @@ void AudioEngine::startPlayback (const juce::AudioBuffer<float>& renderedAudio, 
     playbackBuffer.makeCopyOf (renderedAudio);
     playbackSampleRate = sampleRate;
     playbackPosition.store (0);
+    rampUpRemaining.store (kRampSamples);
     playing.store (true);
 }
 
@@ -334,9 +387,10 @@ bool AudioEngine::fillBuffer (juce::AudioBuffer<float>& outputBuffer, int numSam
     }
 
     int toCopy = juce::jmin (numSamples, available);
+    bool isLastBlock = (pos + toCopy) >= playbackBuffer.getNumSamples();
     const float* src = playbackBuffer.getReadPointer (0, pos);
 
-    // Mix into all output channels
+    // Copy into all output channels
     for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
     {
         float* dst = outputBuffer.getWritePointer (ch);
@@ -344,9 +398,44 @@ bool AudioEngine::fillBuffer (juce::AudioBuffer<float>& outputBuffer, int numSam
             dst[i] = src[i];
     }
 
-    playbackPosition.store (pos + toCopy);
+    // Apply fade-in ramp at playback start
+    int rampUp = rampUpRemaining.load();
+    if (rampUp > 0)
+    {
+        int rampThisBlock = juce::jmin (rampUp, toCopy);
+        int rampOffset = kRampSamples - rampUp;
 
-    return (pos + toCopy) < playbackBuffer.getNumSamples();
+        for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
+        {
+            float* dst = outputBuffer.getWritePointer (ch);
+            for (int i = 0; i < rampThisBlock; ++i)
+            {
+                float fade = static_cast<float> (rampOffset + i) / static_cast<float> (kRampSamples);
+                dst[i] *= fade;
+            }
+        }
+        rampUpRemaining.store (rampUp - rampThisBlock);
+    }
+
+    // Apply fade-out ramp on the last block
+    if (isLastBlock)
+    {
+        int fadeLen = juce::jmin (kRampSamples, toCopy);
+        int fadeStart = toCopy - fadeLen;
+
+        for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
+        {
+            float* dst = outputBuffer.getWritePointer (ch);
+            for (int i = 0; i < fadeLen; ++i)
+            {
+                float fade = 1.0f - (static_cast<float> (i) / static_cast<float> (fadeLen));
+                dst[fadeStart + i] *= fade;
+            }
+        }
+    }
+
+    playbackPosition.store (pos + toCopy);
+    return ! isLastBlock;
 }
 
 double AudioEngine::getPlaybackPosition() const
@@ -360,21 +449,39 @@ bool AudioEngine::fillBufferAtPosition (juce::AudioBuffer<float>& outputBuffer, 
                                          int64_t dawPositionInSamples, int64_t captureStartSample)
 {
     if (! hasRenderedAudio.load())
+    {
+        wasPlayingLastBlock.store (false);
         return false;
+    }
 
     int bufIdx = activeBufferIndex.load();
     const auto& rendered = renderedBuffers[bufIdx];
 
     if (rendered.getNumSamples() == 0)
+    {
+        wasPlayingLastBlock.store (false);
         return false;
+    }
 
     int64_t offsetInCapture = dawPositionInSamples - captureStartSample;
 
     // If DAW position is entirely outside our capture region, output silence
     if (offsetInCapture >= rendered.getNumSamples() || offsetInCapture + numSamples <= 0)
+    {
+        wasPlayingLastBlock.store (false);
         return false;
+    }
 
     const float* src = rendered.getReadPointer (0);
+
+    // Detect buffer swap for crossfade (Fix 4)
+    int prevBufIdx = lastUsedBufferIndex.exchange (bufIdx);
+    bool swapOccurred = (prevBufIdx != bufIdx) && wasPlayingLastBlock.load();
+
+    if (swapOccurred)
+        swapCrossfadeRemaining.store (kSwapCrossfadeSamples);
+
+    int crossfadeLeft = swapCrossfadeRemaining.load();
 
     for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
     {
@@ -384,8 +491,50 @@ bool AudioEngine::fillBufferAtPosition (juce::AudioBuffer<float>& outputBuffer, 
         {
             int64_t readPos = offsetInCapture + i;
             if (readPos >= 0 && readPos < rendered.getNumSamples())
-                dst[i] = src[readPos];
+            {
+                float newSample = src[readPos];
+
+                // Crossfade from old to new buffer after a swap
+                if (crossfadeLeft > 0 && i < crossfadeLeft)
+                {
+                    const auto& oldRendered = renderedBuffers[prevBufIdx];
+                    float oldSample = 0.0f;
+                    if (readPos < oldRendered.getNumSamples())
+                        oldSample = oldRendered.getReadPointer (0)[readPos];
+
+                    int crossfadePos = kSwapCrossfadeSamples - crossfadeLeft + i;
+                    float fade = static_cast<float> (crossfadePos) / static_cast<float> (kSwapCrossfadeSamples);
+                    dst[i] = oldSample * (1.0f - fade) + newSample * fade;
+                }
+                else
+                {
+                    dst[i] = newSample;
+                }
+            }
             // else: already cleared to 0
+        }
+    }
+
+    // Update crossfade remaining
+    if (crossfadeLeft > 0)
+    {
+        int consumed = juce::jmin (crossfadeLeft, numSamples);
+        swapCrossfadeRemaining.store (crossfadeLeft - consumed);
+    }
+
+    // Fade-in if this is the first block we're providing audio
+    bool wasPlaying = wasPlayingLastBlock.exchange (true);
+    if (! wasPlaying)
+    {
+        int fadeLen = juce::jmin (kRampSamples, numSamples);
+        for (int ch = 0; ch < outputBuffer.getNumChannels(); ++ch)
+        {
+            float* dst = outputBuffer.getWritePointer (ch);
+            for (int i = 0; i < fadeLen; ++i)
+            {
+                float fade = static_cast<float> (i) / static_cast<float> (fadeLen);
+                dst[i] *= fade;
+            }
         }
     }
 

@@ -58,4 +58,16 @@ private:
     juce::AudioBuffer<float> playbackBuffer;
     std::atomic<int> playbackPosition { 0 };
     double playbackSampleRate = 44100.0;
+
+    // Playback ramp state (prevents pops at play/stop boundaries)
+    static constexpr int kRampSamples = 256; // ~5ms at 44100 Hz
+    std::atomic<int> rampUpRemaining { 0 };
+
+    // DAW transport ramp state
+    std::atomic<bool> wasPlayingLastBlock { false };
+
+    // Double-buffer swap crossfade state
+    static constexpr int kSwapCrossfadeSamples = 128; // ~3ms at 44100 Hz
+    std::atomic<int> lastUsedBufferIndex { 0 };
+    std::atomic<int> swapCrossfadeRemaining { 0 };
 };
