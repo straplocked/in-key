@@ -6,9 +6,9 @@
 
 enum class PluginState
 {
-    IDLE,
-    CAPTURING,
-    ANALYZING,
-    EDITING,
-    PLAYING
+    IDLE,        // Non-ARA only: waiting for user to start capture
+    CAPTURING,   // Non-ARA only: recording audio from processBlock
+    ANALYZING,   // Both modes: running pitch detection
+    EDITING,     // Both modes: user editing notes
+    PLAYING      // Non-ARA only: plugin-driven playback (ARA uses renderer)
 };

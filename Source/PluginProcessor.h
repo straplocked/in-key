@@ -12,8 +12,10 @@
 #include "Analysis/NoteSegmenter.h"
 #include "DSP/AudioEngine.h"
 #include "Data/TakeData.h"
+#include "ARA/InKeyDocumentController.h"
 
 class InKeyProcessor : public juce::AudioProcessor,
+                       public juce::AudioProcessorARAExtension,
                        private PitchAnalyzer::Listener
 {
 public:
@@ -96,6 +98,10 @@ public:
 
     // DAW transport sync: request background re-render after note edits
     void requestRender();
+
+    // ARA mode helpers
+    bool isInARAMode() const;
+    InKeyDocumentController* getARADocumentController();
 
     // DAW transport state for UI playhead
     std::atomic<double> dawPlayheadInCapture { -1.0 };

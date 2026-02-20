@@ -24,6 +24,7 @@ Builds/
 # ThirdParty libraries (cloned separately)
 ThirdParty/JUCE/
 ThirdParty/rubberband/
+ThirdParty/ARA_SDK/
 
 # Compiled objects
 *.o

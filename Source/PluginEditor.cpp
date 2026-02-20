@@ -5,6 +5,7 @@
 #include "PluginEditor.h"
 #include "Analysis/KeyDetector.h"
 #include "Data/MidiExporter.h"
+#include "ARA/InKeyPlaybackRenderer.h"
 
 InKeyEditor::InKeyEditor (InKeyProcessor& p)
     : AudioProcessorEditor (&p),
@@ -472,6 +473,17 @@ InKeyEditor::InKeyEditor (InKeyProcessor& p)
         }
     }
 
+    // ARA mode: hide capture controls and listen for analysis
+#if JucePlugin_Enable_ARA
+    if (processorRef.isInARAMode())
+    {
+        captureButton.setVisible (false);
+
+        if (auto* dc = processorRef.getARADocumentController())
+            dc->addListener (this);
+    }
+#endif
+
     // Tooltips
     captureButton.setTooltip ("Start/stop audio capture (R)");
     playButton.setTooltip ("Play/stop edited audio (Space)");
@@ -501,6 +513,12 @@ InKeyEditor::~InKeyEditor()
 {
     setLookAndFeel (nullptr);
     stopTimer();
+
+#if JucePlugin_Enable_ARA
+    if (auto* dc = processorRef.getARADocumentController())
+        dc->removeListener (this);
+#endif
+
     processorRef.getPitchAnalyzer().removeListener (this);
     pianoRollComponent.removeListener (this);
 
@@ -628,6 +646,27 @@ void InKeyEditor::resized()
 
 void InKeyEditor::timerCallback()
 {
+#if JucePlugin_Enable_ARA
+    if (processorRef.isInARAMode())
+    {
+        // ARA mode: no capture states to manage
+        // Update DAW playhead tracking if editing
+        if (showPianoRoll)
+        {
+            if (processorRef.dawIsPlaying.load())
+            {
+                double playPos = processorRef.dawPlayheadInCapture.load();
+                pianoRollComponent.setPlayheadPosition (playPos);
+            }
+            else
+            {
+                pianoRollComponent.setPlayheadPosition (-1.0);
+            }
+        }
+        return;
+    }
+#endif
+
     auto state = processorRef.getState();
 
     if (state == PluginState::CAPTURING)
@@ -893,6 +932,56 @@ void InKeyEditor::analysisProgress (float /*progress*/)
 {
 }
 
+void InKeyEditor::araAnalysisComplete (juce::ARAAudioSource* source)
+{
+    auto* dc = processorRef.getARADocumentController();
+    if (dc == nullptr)
+        return;
+
+    auto* analysis = dc->getAnalysis (source);
+    if (analysis == nullptr)
+        return;
+
+    // Load analysis results into the piano roll
+    showPianoRoll = true;
+    double duration = static_cast<double> (analysis->numSamples) / analysis->sampleRate;
+    pianoRollComponent.setData (analysis->notes, analysis->pitchCurve, duration);
+    pianoRollComponent.setVisible (true);
+    propertiesPanel.setVisible (true);
+    playButton.setVisible (true);
+    undoButton.setVisible (true);
+    redoButton.setVisible (true);
+    quantizeButton.setVisible (true);
+    correctPitchButton.setVisible (true);
+    levelButton.setVisible (true);
+    resetButton.setVisible (true);
+    abToggleButton.setVisible (true);
+    detectKeyButton.setVisible (true);
+    exportMidiButton.setVisible (true);
+    settingsButton.setVisible (true);
+    scaleRootSelector.setVisible (true);
+    scaleTypeSelector.setVisible (true);
+    quantizeStrengthSlider.setVisible (true);
+    tuningLabel.setVisible (true);
+    tuningSlider.setVisible (true);
+    timeQuantizeButton.setVisible (true);
+    bpmLabel.setVisible (true);
+    bpmSlider.setVisible (true);
+    subdivisionSelector.setVisible (true);
+    waveformComponent.setVisible (false);
+    pitchCurveComponent.setVisible (false);
+
+    statusLabel.setText ("ARA: " + juce::String (analysis->notes.size()) + " notes detected",
+                         juce::dontSendNotification);
+    resized();
+}
+
+void InKeyEditor::araAnalysisProgress (juce::ARAAudioSource* /*source*/, float progress)
+{
+    statusLabel.setText ("Analyzing... " + juce::String (static_cast<int> (progress * 100.0f)) + "%",
+                         juce::dontSendNotification);
+}
+
 void InKeyEditor::noteSelected (const Note* note)
 {
     // Called for single selection or first selected note
@@ -959,6 +1048,39 @@ void InKeyEditor::playFromPositionRequested (double timeInSeconds)
 
 void InKeyEditor::notesChanged()
 {
+#if JucePlugin_Enable_ARA
+    if (processorRef.isInARAMode())
+    {
+        // ARA mode: update the analysis data with edited notes and re-render
+        if (auto* dc = processorRef.getARADocumentController())
+        {
+            if (auto* araController = dc->getDocumentController())
+            {
+                // Find the first active ARA source with analysis and update its notes
+                if (auto* doc = araController->getDocument<juce::ARADocument>())
+                {
+                    for (auto* source : doc->getAudioSources())
+                    {
+                        auto* analysis = dc->getAnalysis (source);
+                        if (analysis != nullptr && analysis->analysisComplete.load())
+                        {
+                            analysis->notes = pianoRollComponent.getNotes();
+                            break;
+                        }
+                    }
+                }
+
+                // Signal all playback renderers to re-render
+                for (auto* renderer : araController->getPlaybackRenderers<InKeyPlaybackRenderer>())
+                {
+                    renderer->notifyEditsChanged();
+                }
+            }
+        }
+        return;
+    }
+#endif
+
     // Save edited notes to active take and request background re-render
     if (processorRef.getActiveTakeIndex() >= 0)
         processorRef.saveActiveTakeNotes (pianoRollComponent.getNotes());

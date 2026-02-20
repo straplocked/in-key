@@ -33,6 +33,11 @@ InKeyProcessor::~InKeyProcessor()
 
 void InKeyProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+#if JucePlugin_Enable_ARA
+    if (isBoundToARA())
+        return;
+#endif
+
     audioCapture.prepare (sampleRate, samplesPerBlock);
 }
 
@@ -43,6 +48,16 @@ void InKeyProcessor::releaseResources()
 void InKeyProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& /*midiMessages*/)
 {
     juce::ScopedNoDenormals noDenormals;
+
+#if JucePlugin_Enable_ARA
+    // In ARA mode, delegate to the ARA renderers
+    if (isBoundToARA())
+    {
+        if (! processBlockForARA (buffer, isRealtime(), getPlayHead()))
+            buffer.clear();
+        return;
+    }
+#endif
 
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -690,6 +705,26 @@ void InKeyProcessor::setStateInformation (const void* data, int sizeInBytes)
     {
         currentState.store (PluginState::IDLE);
     }
+}
+
+bool InKeyProcessor::isInARAMode() const
+{
+#if JucePlugin_Enable_ARA
+    return isBoundToARA();
+#else
+    return false;
+#endif
+}
+
+InKeyDocumentController* InKeyProcessor::getARADocumentController()
+{
+#if JucePlugin_Enable_ARA
+    if (isBoundToARA())
+        if (auto* dc = ARA::PlugIn::PlugInExtension::getDocumentController())
+            return juce::ARADocumentControllerSpecialisation
+                ::getSpecialisedDocumentController<InKeyDocumentController> (dc);
+#endif
+    return nullptr;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

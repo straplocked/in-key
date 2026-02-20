@@ -8,6 +8,9 @@ include(FetchContent)
 
 add_subdirectory(ThirdParty/JUCE)
 
+# ARA SDK 2.2.0 for ARA2 plugin integration
+juce_set_ara_sdk_path("${CMAKE_SOURCE_DIR}/ThirdParty/ARA_SDK")
+
 # Fetch Rubber Band Library for pitch/time shifting (single-file build)
 FetchContent_Declare(
     rubberband
@@ -40,9 +43,14 @@ juce_add_plugin(InKey
     COMPANY_NAME "InKey"
     PLUGIN_MANUFACTURER_CODE Inky
     PLUGIN_CODE Vedt
-    FORMATS VST3 Standalone
+    FORMATS VST3 AU Standalone
     PRODUCT_NAME "InKey"
     BUNDLE_ID "com.inkey.vocaleditor"
+    IS_ARA_EFFECT TRUE
+    ARA_FACTORY_ID "com.inkey.vocaleditor.arafactory"
+    ARA_DOCUMENT_ARCHIVE_ID "com.inkey.vocaleditor.aradocumentarchive"
+    ARA_ANALYSIS_TYPES kARAContentTypeNotes
+    ARA_TRANSFORMATION_FLAGS kARAPlaybackTransformationTimestretch|kARAPlaybackTransformationTimestretchReflectingTempo|kARAPlaybackTransformationContentBasedFadeAtTail|kARAPlaybackTransformationContentBasedFadeAtHead
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
@@ -71,6 +79,9 @@ target_sources(InKey PRIVATE
     Source/Analysis/SibilantDetector.cpp
     Source/Analysis/VibratoAnalyzer.cpp
     Source/Data/MidiExporter.cpp
+    Source/ARA/InKeyDocumentController.cpp
+    Source/ARA/InKeyPlaybackRenderer.cpp
+    Source/ARA/InKeyEditorRenderer.cpp
 )
 
 target_compile_definitions(InKey PUBLIC
@@ -83,6 +94,7 @@ target_compile_definitions(InKey PUBLIC
 target_link_libraries(InKey
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_audio_formats
         juce::juce_dsp
         rubberband
         InKeyBinaryData
