@@ -82,6 +82,9 @@ target_sources(InKey PRIVATE
     Source/ARA/InKeyDocumentController.cpp
     Source/ARA/InKeyPlaybackRenderer.cpp
     Source/ARA/InKeyEditorRenderer.cpp
+    Source/Presets/PresetData.cpp
+    Source/Presets/PresetManager.cpp
+    Source/UI/PresetPanel.cpp
 )
 
 target_compile_definitions(InKey PUBLIC

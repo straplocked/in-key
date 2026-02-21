@@ -13,6 +13,7 @@
 #include "DSP/AudioEngine.h"
 #include "Data/TakeData.h"
 #include "ARA/InKeyDocumentController.h"
+#include "Presets/PresetManager.h"
 
 class InKeyProcessor : public juce::AudioProcessor,
                        public juce::AudioProcessorARAExtension,
@@ -71,6 +72,7 @@ public:
     AudioEngine& getAudioEngine() { return audioEngine; }
     PitchDetector::Settings& getPitchDetectorSettings() { return pitchAnalyzer.getDetectorSettings(); }
     NoteSegmenter& getNoteSegmenter() { return noteSegmenter; }
+    PresetManager& getPresetManager() { return presetManager; }
 
     // Re-analyze the active take with current settings
     void reanalyzeActiveTake();
@@ -132,6 +134,9 @@ private:
 
     // Master tuning
     float a4Reference = 440.0f;
+
+    // Presets
+    PresetManager presetManager;
 
     // DAW transport sync
     std::atomic<bool> captureJustStarted { false };

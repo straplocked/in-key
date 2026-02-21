@@ -13,6 +13,8 @@
 #include "UI/PropertiesPanel.h"
 #include "UI/DetectionSettingsDialog.h"
 #include "ARA/InKeyDocumentController.h"
+#include "Presets/PresetData.h"
+#include "UI/PresetPanel.h"
 
 class InKeyEditor : public juce::AudioProcessorEditor,
                     private juce::Timer,
@@ -58,6 +60,10 @@ private:
     // Build current scale from selector state
     ScaleDefinition getCurrentScale() const;
 
+    // Preset support
+    PresetData gatherCurrentSettings();
+    void applyPreset (const PresetData& preset);
+
     InKeyLookAndFeel lookAndFeel;
     InKeyProcessor& processorRef;
 
@@ -95,6 +101,7 @@ private:
     PitchCurveComponent pitchCurveComponent;
     PianoRollComponent pianoRollComponent;
     PropertiesPanel propertiesPanel;
+    PresetPanel presetPanel;
 
     bool showPianoRoll = false;
 
