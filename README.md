@@ -6,7 +6,10 @@ A Melodyne-style VST3 plugin for graphical vocal pitch correction and multi-take
 
 ## Screenshot
 
-> Screenshot coming soon.
+![InKey](Docs/images/plugin-screenshot.png)
+
+*A captured take with YIN pitch detection applied: each detected note is
+segmented onto the piano roll with its vibrato contour.*
 
 ## Features
 
