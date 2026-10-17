@@ -11,19 +11,16 @@ InKey is a Melodyne-style VST3 plugin for graphical vocal pitch correction and m
 ## Build Commands
 
 ```bash
-# Clone dependencies (if not already present)
-git clone --depth 1 --branch 7.0.12 \
-  https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
-git clone --depth 1 \
-  https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
-
-# Build
+# JUCE 7.0.12 and Rubber Band v3.3.0 are fetched by CMake (FetchContent).
+# An existing checkout at ThirdParty/JUCE is used instead of fetching, if present.
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 
-# Run tests
-cmake --build build --target InKeyTests
-./build/Tests/InKeyTests
+# Run tests (builds InKeyTests as part of the default target)
+ctest --test-dir build -C Release --output-on-failure
+
+# Optional: ARA2 support (fetches the ARA SDK 2.2.0, or set -DARA_SDK_PATH=/path/to/ARA_SDK)
+cmake -B build -DENABLE_ARA=ON
 ```
 
 ## Architecture

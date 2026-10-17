@@ -5,7 +5,9 @@
 #include "PluginEditor.h"
 #include "Analysis/KeyDetector.h"
 #include "Data/MidiExporter.h"
-#include "ARA/InKeyPlaybackRenderer.h"
+#if JucePlugin_Enable_ARA
+ #include "ARA/InKeyPlaybackRenderer.h"
+#endif
 
 InKeyEditor::InKeyEditor (InKeyProcessor& p)
     : AudioProcessorEditor (&p),
@@ -943,6 +945,7 @@ void InKeyEditor::analysisProgress (float /*progress*/)
 {
 }
 
+#if JucePlugin_Enable_ARA
 void InKeyEditor::araAnalysisComplete (juce::ARAAudioSource* source)
 {
     auto* dc = processorRef.getARADocumentController();
@@ -992,6 +995,7 @@ void InKeyEditor::araAnalysisProgress (juce::ARAAudioSource* /*source*/, float p
     statusLabel.setText ("Analyzing... " + juce::String (static_cast<int> (progress * 100.0f)) + "%",
                          juce::dontSendNotification);
 }
+#endif
 
 void InKeyEditor::noteSelected (const Note* note)
 {

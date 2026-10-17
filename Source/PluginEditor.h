@@ -12,15 +12,19 @@
 #include "UI/PianoRollComponent.h"
 #include "UI/PropertiesPanel.h"
 #include "UI/DetectionSettingsDialog.h"
-#include "ARA/InKeyDocumentController.h"
+#if JucePlugin_Enable_ARA
+ #include "ARA/InKeyDocumentController.h"
+#endif
 #include "Presets/PresetData.h"
 #include "UI/PresetPanel.h"
 
 class InKeyEditor : public juce::AudioProcessorEditor,
                     private juce::Timer,
                     private PitchAnalyzer::Listener,
-                    private PianoRollComponent::Listener,
-                    private InKeyDocumentController::Listener
+                    private PianoRollComponent::Listener
+#if JucePlugin_Enable_ARA
+                  , private InKeyDocumentController::Listener
+#endif
 {
 public:
     explicit InKeyEditor (InKeyProcessor&);
@@ -37,9 +41,11 @@ private:
     void analysisComplete() override;
     void analysisProgress (float progress) override;
 
+#if JucePlugin_Enable_ARA
     // InKeyDocumentController::Listener (ARA mode)
     void araAnalysisComplete (juce::ARAAudioSource* source) override;
     void araAnalysisProgress (juce::ARAAudioSource* source, float progress) override;
+#endif
 
     // PianoRollComponent::Listener
     void noteSelected (const Note* note) override;

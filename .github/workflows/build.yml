@@ -2,26 +2,83 @@ name: Build & Test
 
 on: [push, pull_request]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# JUCE, Rubber Band, Catch2 (and the ARA SDK when ENABLE_ARA=ON) are fetched by
+# CMake's FetchContent at configure time, so there is nothing to clone here.
+
+# NOTE: Windows jobs are pinned to windows-latest (VS 2022 generator). windows-latest
+# now resolves to a VS 2026 image. windows-latest is being retired by GitHub, so
+# moving to the VS 2026 generator is follow-up work.
+
 jobs:
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Clone JUCE
-        run: git clone --depth 1 --branch 7.0.12 https://github.com/juce-framework/JUCE.git ThirdParty/JUCE
-
-      - name: Clone Rubber Band
-        run: git clone --depth 1 https://github.com/breakfastquay/rubberband.git ThirdParty/rubberband
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --config Release
-
-      - name: Build Tests
-        run: cmake --build build --target InKeyTests
+        run: cmake --build build --config Release --parallel 4
 
       - name: Run Tests
-        run: ./build/Tests/InKeyTests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-plugins
+          if-no-files-found: error
+          path: |
+            build/InKey_artefacts/**/*.app
+            build/InKey_artefacts/**/*.vst3
+            build/InKey_artefacts/**/*.component
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Run Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-plugins
+          if-no-files-found: error
+          path: |
+            build/InKey_artefacts/**/*.exe
+            build/InKey_artefacts/**/*.vst3
+
+  # ARA2 is opt-in (-DENABLE_ARA=ON). Verify it still builds on both platforms.
+  build-ara:
+    name: build-ara (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_ARA=ON -DBUILD_TESTS=OFF
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -B build -DENABLE_ARA=ON -DBUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4

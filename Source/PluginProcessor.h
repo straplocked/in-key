@@ -12,11 +12,17 @@
 #include "Analysis/NoteSegmenter.h"
 #include "DSP/AudioEngine.h"
 #include "Data/TakeData.h"
-#include "ARA/InKeyDocumentController.h"
+#if JucePlugin_Enable_ARA
+ #include "ARA/InKeyDocumentController.h"
+#else
+class InKeyDocumentController;  // ARA disabled: only ever a null pointer
+#endif
 #include "Presets/PresetManager.h"
 
 class InKeyProcessor : public juce::AudioProcessor,
+#if JucePlugin_Enable_ARA
                        public juce::AudioProcessorARAExtension,
+#endif
                        private PitchAnalyzer::Listener
 {
 public:
