@@ -88,6 +88,11 @@ add_library(rubberband STATIC
 target_include_directories(rubberband PUBLIC
     ${rubberband_SOURCE_DIR}
 )
+# The VST3 is a shared module, so every static library linked into it must be
+# position-independent. Without this, the Linux link fails with
+# "relocation R_X86_64_PC32 ... can not be used when making a shared object".
+# macOS and Windows link fine either way, so only Linux surfaces it.
+set_target_properties(rubberband PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # MSVC: keep <windows.h> from defining min/max macros, which break
 # std::numeric_limits<T>::max() inside Rubber Band.
 if(MSVC)
