@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.1.0), for dry runs'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+      - name: Check version matches CMakeLists.txt
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          # Two layouts in this family: split *_VERSION_MAJOR/MINOR/PATCH vars,
+          # or a single project(Name VERSION x.y.z).
+          MAJOR=$(grep -oE '_VERSION_MAJOR[^0-9]+[0-9]+' CMakeLists.txt | head -1 | grep -oE '[0-9]+$' || true)
+          if [ -n "$MAJOR" ]; then
+            MINOR=$(grep -oE '_VERSION_MINOR[^0-9]+[0-9]+' CMakeLists.txt | head -1 | grep -oE '[0-9]+$')
+            PATCH=$(grep -oE '_VERSION_PATCH[^0-9]+[0-9]+' CMakeLists.txt | head -1 | grep -oE '[0-9]+$')
+            CMAKE_VERSION="$MAJOR.$MINOR.$PATCH"
+          else
+            CMAKE_VERSION=$(grep -oE 'project\([A-Za-z_]+ +VERSION +[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          fi
+          echo "tag=$VERSION cmake=$CMAKE_VERSION"
+          if [ -z "$CMAKE_VERSION" ]; then
+            echo "::error::Could not read a version out of CMakeLists.txt"
+            exit 1
+          fi
+          if [ "$VERSION" != "$CMAKE_VERSION" ]; then
+            echo "::error::Tag v$VERSION does not match CMakeLists.txt $CMAKE_VERSION"
+            exit 1
+          fi
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 is the LAST image that can build JUCE 7 -- newer SDKs
+          # removed CGWindowListCreateImage. Do not bump without a JUCE upgrade.
+          - os: macos-14
+            platform: macOS
+          - os: windows-latest
+            platform: Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.validate.outputs.version }}"
+          STAGE="${{ github.event.repository.name }}-$VERSION-${{ matrix.platform }}"
+          mkdir -p "$STAGE"
+          shopt -s nullglob
+          COPIED=0
+          # Target names differ per repo, so glob the artefacts dir rather than naming it.
+          for item in \
+            build/*_artefacts/Release/VST3/*.vst3 \
+            build/*_artefacts/Release/AU/*.component \
+            build/*_artefacts/Release/CLAP/*.clap \
+            build/*_artefacts/Release/Standalone/*.app \
+            build/*_artefacts/Release/Standalone/*.exe \
+            build/*_artefacts/Release/Standalone/* ; do
+            [ -e "$item" ] || continue
+            case "$item" in *.ilk|*.pdb|*.exp|*.lib) continue;; esac
+            cp -R "$item" "$STAGE/" && COPIED=$((COPIED+1))
+          done
+          if [ "$COPIED" -eq 0 ]; then
+            echo "::error::No plugin artifacts found under build/*_artefacts/Release -- refusing to publish an empty archive"
+            find build -maxdepth 4 -name '*_artefacts' -type d || true
+            exit 1
+          fi
+          echo "Staged $COPIED item(s):"
+          ls -la "$STAGE"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Verify macOS binaries are universal
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FAILED=0
+          while IFS= read -r bin; do
+            ARCHS=$(lipo -archs "$bin" 2>/dev/null || echo "")
+            echo "$bin -> [$ARCHS]"
+            case "$ARCHS" in
+              *x86_64*arm64*|*arm64*x86_64*) ;;
+              *) echo "::error::$bin is not universal (got: $ARCHS)"; FAILED=1;;
+            esac
+          done < <(find "$STAGE" -type f -perm +111 -path '*Contents/MacOS/*')
+          [ "$FAILED" -eq 0 ]
+
+      - name: Add install instructions
+        shell: bash
+        run: |
+          cat > "$STAGE/INSTALL.txt" <<'TXT'
+          INSTALLATION
+          ============
+
+          macOS
+          -----
+          Copy into:
+            VST3        ~/Library/Audio/Plug-Ins/VST3/
+            AU          ~/Library/Audio/Plug-Ins/Components/
+            Standalone  /Applications/
+
+          These builds are NOT code-signed or notarized, so macOS will
+          refuse to open them the first time. Clear the quarantine flag:
+
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/<name>.vst3
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/<name>.component
+
+          The macOS builds are universal and run natively on both Apple
+          Silicon and Intel.
+
+          Windows
+          -------
+          Copy the .vst3 folder into:
+            C:\Program Files\Common Files\VST3\
+
+          The standalone .exe can live anywhere.
+
+          Rescan plugins in your DAW afterwards.
+          TXT
+
+      - name: Create archive
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -Command "Compress-Archive -Path '$STAGE' -DestinationPath '$STAGE.zip'"
+          else
+            zip -qry "$STAGE.zip" "$STAGE"
+          fi
+          ls -la "$STAGE.zip"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ github.event.repository.name }}-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [validate, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List what will be published
+        run: find artifacts -type f -name '*.zip' -exec ls -la {} \;
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ needs.validate.outputs.version }}
+          generate_release_notes: true
+          files: artifacts/**/*.zip
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
