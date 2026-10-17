@@ -88,6 +88,11 @@ add_library(rubberband STATIC
 target_include_directories(rubberband PUBLIC
     ${rubberband_SOURCE_DIR}
 )
+# MSVC: keep <windows.h> from defining min/max macros, which break
+# std::numeric_limits<T>::max() inside Rubber Band.
+if(MSVC)
+    target_compile_definitions(rubberband PRIVATE NOMINMAX _USE_MATH_DEFINES)
+endif()
 # macOS needs Accelerate framework for vDSP
 if(APPLE)
     target_link_libraries(rubberband PRIVATE "-framework Accelerate")
