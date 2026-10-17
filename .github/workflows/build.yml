@@ -9,6 +9,10 @@ concurrency:
 # JUCE, Rubber Band, Catch2 (and the ARA SDK when ENABLE_ARA=ON) are fetched by
 # CMake's FetchContent at configure time, so there is nothing to clone here.
 
+# NOTE: Windows jobs are pinned to windows-2022 (VS 2022 generator). windows-latest
+# now resolves to a VS 2026 image. windows-2022 is being retired by GitHub, so
+# moving to the VS 2026 generator is follow-up work.
+
 jobs:
   build-macos:
     runs-on: macos-14
@@ -35,12 +39,12 @@ jobs:
             build/InKey_artefacts/**/*.component
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -B build
+        run: cmake -B build -G "Visual Studio 17 2022"
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
@@ -64,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +78,7 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -B build -DENABLE_ARA=ON -DBUILD_TESTS=OFF
+        run: cmake -B build -G "Visual Studio 17 2022" -DENABLE_ARA=ON -DBUILD_TESTS=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
